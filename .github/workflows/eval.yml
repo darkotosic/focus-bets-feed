@@ -1,0 +1,32 @@
+name: evaluate
+
+on:
+  schedule:
+    - cron: "45 21 * * *"   # 00:10 Beograd zimi, 01:10 leti
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pip install httpx
+      - name: Evaluate results
+        env:
+          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
+        run: python evaluate_results.py
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with: { path: public }
+  deploy:
+    needs: eval
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/deploy-pages@v4
