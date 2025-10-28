@@ -21,6 +21,14 @@ jobs:
       - name: Generate JSON feed
         env:
           API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
+          TIMEZONE: Europe/Belgrade
+          TICKET_TARGETS: "2.0,3.0,4.0"
+          LEGS_MIN: "3"
+          LEGS_MAX: "7"
+          MAX_PER_COUNTRY: "3"
+          MAX_HEAVY_FAVORITES: "2"
+          RELAX_STEPS: "6"
+          RELAX_ADD: "0.03"
         run: python focus_bets.py
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
