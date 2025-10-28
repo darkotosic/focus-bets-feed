@@ -558,7 +558,15 @@ def build_three_tickets(date_str: str) -> List[str]:
 
 
 # ===== OpenAI reasoning =====
+
+
+class OpenAIConfigError(RuntimeError):
+    """Raised when the OpenAI client is not properly configured."""
+
+
 def _openai_headers() -> Dict[str, str]:
+    if not OPENAI_API_KEY:
+        raise OpenAIConfigError("OPENAI_API_KEY environment variable is not set")
     headers = {"Authorization": f"Bearer {OPENAI_API_KEY}"}
     if OPENAI_ORG:
         headers["OpenAI-Organization"] = OPENAI_ORG
@@ -569,6 +577,9 @@ PROMPT_REASON = (
     "You are a football analyst. For the ticket below, write up to 5 one-line bullets "
     "with concrete stats if available (form L5, hit rates). Plain text only."
 )
+
+
+REASONING_FALLBACK = "- analysis unavailable -"
 
 
 def openai_reason(ticket_text: str) -> str:
@@ -695,12 +706,29 @@ def run(date_str: Optional[str] = None) -> Dict[str, Any]:
     tickets = build_three_tickets(date_str)
     _log(f"🎯 built_tickets={len(tickets)}")
     tickets_with_reason: List[str] = []
+    openai_available = True
+    openai_error_logged = False
+    try:
+        _openai_headers()
+    except OpenAIConfigError as exc:
+        openai_available = False
+        openai_error_logged = True
+        _log(f"ℹ️ OpenAI reasoning disabled: {exc}")
     for ticket in tickets:
-        try:
-            reasoning = openai_reason(ticket)
-        except Exception as exc:  # pragma: no cover - depends on external service
-            _log(f"⚠️ OpenAI fail: {exc}")
-            reasoning = "- analysis unavailable -"
+        if not openai_available:
+            reasoning = REASONING_FALLBACK
+        else:
+            try:
+                reasoning = openai_reason(ticket)
+            except OpenAIConfigError as exc:
+                if not openai_error_logged:
+                    _log(f"ℹ️ OpenAI reasoning disabled: {exc}")
+                    openai_error_logged = True
+                openai_available = False
+                reasoning = REASONING_FALLBACK
+            except Exception as exc:  # pragma: no cover - depends on external service
+                _log(f"⚠️ OpenAI fail: {exc}")
+                reasoning = REASONING_FALLBACK
         tickets_with_reason.append(f"{ticket}\n\n🧠 Reasoning:\n{reasoning}")
 
     write_daily_log(date_str, tickets_with_reason)
