@@ -473,7 +473,7 @@ def _diversity_ok(ticket: List[Dict[str, Any]], cand: Dict[str, Any]) -> bool:
     return True
 
 
-def _format_ticket(n: int, legs: List[Dict[str, Any]]) -> str:
+def _format_ticket_text(n: int, legs: List[Dict[str, Any]]) -> str:
     parts = [f"🎫 Ticket #{n}"]
     comps: List[str] = []
     for leg in legs:
@@ -495,7 +495,7 @@ def _format_ticket(n: int, legs: List[Dict[str, Any]]) -> str:
 
 def _build_for_target(
     pool: List[Dict[str, Any]], target: float, used_fids: set
-) -> Optional[List[Dict[str, Any]]]:
+) -> Optional[Dict[str, Any]]:
     cand = [x for x in pool if x["fid"] not in used_fids]
     cand.sort(key=lambda L: L["odd"], reverse=True)
     best: Optional[List[Dict[str, Any]]] = None
@@ -534,11 +534,30 @@ def _build_for_target(
 
     if not best:
         dfs(0, [], 1.0)
-    return best
+    if not best:
+        return None
+    return {"legs": best, "total_odds": _product([l["odd"] for l in best])}
 
 
-def build_three_tickets(date_str: str) -> List[str]:
-    tickets: List[str] = []
+def _target_key(value: float) -> str:
+    return f"{value:.4f}"
+
+
+def _serialize_leg_for_public(leg: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "fixture_id": int(leg["fid"]),
+        "market": leg["market"],
+        "pick": leg["pick_name"],
+        "odd": float(leg["odd"]),
+        "league": leg["league"],
+        "teams": leg["teams"],
+        "time": leg["time"],
+        "country": leg["country"],
+    }
+
+
+def build_three_tickets(date_str: str) -> List[Dict[str, Any]]:
+    tickets: List[Dict[str, Any]] = []
     used: set[int] = set()
     caps = dict(BASE_TH)
     for step in range(RELAX_STEPS + 1):
@@ -548,8 +567,22 @@ def build_three_tickets(date_str: str) -> List[str]:
                 continue
             built = _build_for_target(legs, target, used)
             if built:
-                tickets.append(_format_ticket(len(tickets) + 1, built))
-                used.update(x["fid"] for x in built)
+                number = len(tickets) + 1
+                tickets.append(
+                    {
+                        "text": _format_ticket_text(number, built["legs"]),
+                        "payload": {
+                            "target_odds": target,
+                            "total_odds": built["total_odds"],
+                            "legs": [
+                                _serialize_leg_for_public(leg)
+                                for leg in built["legs"]
+                            ],
+                        },
+                        "target_key": _target_key(target),
+                    }
+                )
+                used.update(x["fid"] for x in built["legs"])
         if len(tickets) >= 3:
             break
         caps = {k: (v + RELAX_ADD) for k, v in caps.items()}
@@ -695,13 +728,31 @@ def run(date_str: Optional[str] = None) -> Dict[str, Any]:
     tickets = build_three_tickets(date_str)
     _log(f"🎯 built_tickets={len(tickets)}")
     tickets_with_reason: List[str] = []
+    os.makedirs("public", exist_ok=True)
+    target_map = {ticket["target_key"]: ticket for ticket in tickets}
+    for idx, fname in enumerate(["2plus", "3plus", "4plus"]):
+        target = TARGETS[idx] if idx < len(TARGETS) else None
+        key = _target_key(target) if target is not None else None
+        ticket_entry = target_map.get(key) if key else None
+        payload = {
+            "date": date_str,
+            "target_odds": target,
+            "total_odds": None,
+            "legs": [],
+        }
+        if ticket_entry:
+            payload.update(ticket_entry["payload"])
+            payload["date"] = date_str
+        with open(f"public/{fname}.json", "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+
     for ticket in tickets:
         try:
-            reasoning = openai_reason(ticket)
+            reasoning = openai_reason(ticket["text"])
         except Exception as exc:  # pragma: no cover - depends on external service
             _log(f"⚠️ OpenAI fail: {exc}")
             reasoning = "- analysis unavailable -"
-        tickets_with_reason.append(f"{ticket}\n\n🧠 Reasoning:\n{reasoning}")
+        tickets_with_reason.append(f"{ticket['text']}\n\n🧠 Reasoning:\n{reasoning}")
 
     write_daily_log(date_str, tickets_with_reason)
 
