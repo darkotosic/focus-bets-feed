@@ -15,6 +15,8 @@ FILES = [
     ("4plus", "public/4plus.json"),
 ]
 
+EMOJI = {"win": "✅", "lose": "❌", "pending": "⏳"}
+
 def _http(path: str, params: Dict[str, Any]) -> Any:
     headers = {"x-apisports-key": API_KEY}
     url = f"{BASE_URL}{path}"
@@ -53,8 +55,52 @@ def _pending(status: str) -> bool:
     code = (status or "").upper()
     return code not in ("FT", "AET", "PEN")
 
+def _fixture_id_from_leg(leg: Dict[str, Any]) -> Optional[int]:
+    for key in ("fixture_id", "fid", "fixtureId", "fixtureID"):
+        if key in leg:
+            try:
+                return int(leg[key])
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def _market_from_leg(leg: Dict[str, Any]) -> str:
+    for key in ("market", "market_name", "market_display"):
+        val = leg.get(key)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+        if val not in (None, ""):
+            return str(val)
+    return ""
+
+
+def _pick_from_leg(leg: Dict[str, Any]) -> str:
+    for key in ("pick", "pick_name", "selection", "value"):
+        val = leg.get(key)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+        if val not in (None, ""):
+            return str(val)
+    return ""
+
+
+def _decorate_with_mark(text: Any, mark: str) -> Any:
+    if not mark or text is None:
+        return text
+    text_str = str(text)
+    if not text_str:
+        return text
+    return f"{text_str} {mark}"
+
+
 def judge_leg(leg: Dict[str, Any], fx: Dict[str, Any]) -> Dict[str, Any]:
-    res = {"fixture_id": leg["fixture_id"], "market": leg["market"], "pick": leg["pick"], "result": "pending"}
+    res = {
+        "fixture_id": leg["fixture_id"],
+        "market": leg["market"],
+        "pick": leg["pick"],
+        "result": "pending",
+    }
     st = ((fx.get("fixture") or {}).get("status") or {}).get("short", "")
     if _pending(st):
         return res
@@ -115,31 +161,108 @@ def judge_leg(leg: Dict[str, Any], fx: Dict[str, Any]) -> Dict[str, Any]:
     return res
 
 def evaluate_ticket(src: Dict[str, Any]) -> Dict[str, Any]:
+    ticket_src = src.get("ticket") if isinstance(src, dict) else None
+    if isinstance(ticket_src, dict):
+        base = ticket_src
+    else:
+        base = src if isinstance(src, dict) else {}
+
+    date_val = None
+    target_val = None
+    total_val = None
+    if isinstance(src, dict):
+        date_val = src.get("date") or None
+        target_val = src.get("target_odds") if src.get("target_odds") is not None else None
+        total_val = src.get("total_odds") if src.get("total_odds") is not None else None
+    else:
+        date_val = None
+    if isinstance(base, dict):
+        if date_val is None:
+            date_val = base.get("date")
+        if target_val is None:
+            target_val = base.get("target_odds")
+        if total_val is None:
+            total_val = base.get("total_odds")
+
     out = {
-        "date": src.get("date"),
-        "target_odds": src.get("target_odds"),
-        "total_odds": src.get("total_odds"),
+        "date": date_val,
+        "target_odds": target_val,
+        "total_odds": total_val,
         "legs": [],
         "ticket_result": "pending",
+        "ticket_result_emoji": "",
         "wins": 0,
         "loses": 0,
         "pendings": 0,
     }
+    if "name" in src:
+        out["name"] = src["name"]
+    fx_cache: Dict[int, Dict[str, Any]] = {}
     all_done = True
     all_win = True
 
-    for L in src.get("legs", []):
-        fid = int(L["fixture_id"])
-        fx = _get_fixture(fid)
+    legs_list = base.get("legs") if isinstance(base, dict) else []
+    if not isinstance(legs_list, list):
+        legs_list = []
+
+    for L in legs_list:
+        if not isinstance(L, dict):
+            continue
+        fid = _fixture_id_from_leg(L)
+        if fid is None:
+            all_done = False
+            all_win = False
+            pending_leg = dict(L)
+            pending_leg.setdefault("result", "pending")
+            leg_pick_raw = _pick_from_leg(L)
+            pending_mark = EMOJI.get("pending", "")
+            pending_leg.setdefault("pick_original", leg_pick_raw)
+            if "pick" in pending_leg or leg_pick_raw:
+                original_pick = pending_leg.get("pick", leg_pick_raw)
+                pending_leg["pick"] = _decorate_with_mark(original_pick, pending_mark)
+            if "pick_display" in pending_leg:
+                original_display = pending_leg["pick_display"]
+                pending_leg.setdefault("pick_display_original", original_display)
+                pending_leg["pick_display"] = _decorate_with_mark(original_display, pending_mark)
+            pending_leg["result_emoji"] = pending_mark
+            out["legs"].append(pending_leg)
+            out["pendings"] += 1
+            continue
+
+        fx = fx_cache.get(fid)
+        if fx is None:
+            fx = _get_fixture(fid)
+            fx_cache[fid] = fx
+
+        leg_market = _market_from_leg(L)
+        leg_pick = _pick_from_leg(L)
         r = judge_leg(
             {
                 "fixture_id": fid,
-                "market": L["market"],
-                "pick": L["pick"],
+                "market": leg_market,
+                "pick": leg_pick,
             },
             fx,
         )
-        out["legs"].append(r)
+
+        mark = EMOJI.get(r["result"], "")
+        decorated = dict(L)
+        decorated["fixture_id"] = fid
+        decorated["market"] = leg_market
+        decorated["pick_original"] = leg_pick
+        decorated["pick"] = _decorate_with_mark(leg_pick, mark)
+        if "pick_display" in decorated:
+            original_display = decorated["pick_display"]
+            decorated["pick_display_original"] = original_display
+            decorated["pick_display"] = _decorate_with_mark(original_display, mark)
+        decorated["result"] = r["result"]
+        decorated["result_emoji"] = mark
+        if "score_ft" in r:
+            decorated["score_ft"] = r["score_ft"]
+        if "score_ht" in r:
+            decorated["score_ht"] = r["score_ht"]
+        out["legs"].append(decorated)
+
         if r["result"] == "win":
             out["wins"] += 1
         elif r["result"] == "lose":
@@ -154,6 +277,8 @@ def evaluate_ticket(src: Dict[str, Any]) -> Dict[str, Any]:
         out["ticket_result"] = "win" if all_win else "lose"
     else:
         out["ticket_result"] = "pending"
+
+    out["ticket_result_emoji"] = EMOJI.get(out["ticket_result"], "")
     return out
 
 def main() -> None:
@@ -171,11 +296,25 @@ def main() -> None:
 
     # evaluacija
     os.makedirs("public", exist_ok=True)
-    daily = {"date": tickets[0][1].get("date"), "evaluated_at_utc": datetime.now(timezone.utc).isoformat(), "tickets": []}
+    daily = {"date": None, "evaluated_at_utc": datetime.now(timezone.utc).isoformat(), "tickets": []}
 
     for key, src in tickets:
         out = evaluate_ticket(src)
-        daily["tickets"].append({"name": key, "ticket_result": out["ticket_result"], "wins": out["wins"], "loses": out["loses"], "pendings": out["pendings"]})
+        if daily["date"] is None:
+            # Prefer evaluated ticket date, fall back to source structure
+            if isinstance(src, dict):
+                ticket_obj = src.get("ticket") if isinstance(src.get("ticket"), dict) else {}
+                daily["date"] = src.get("date") or ticket_obj.get("date")
+            if daily["date"] is None:
+                daily["date"] = out.get("date")
+        daily["tickets"].append({
+            "name": key,
+            "ticket_result": out["ticket_result"],
+            "ticket_result_emoji": out.get("ticket_result_emoji", ""),
+            "wins": out["wins"],
+            "loses": out["loses"],
+            "pendings": out["pendings"],
+        })
         with open(f"public/eval_{key}.json", "w", encoding="utf-8") as f:
             json.dump(out, f, ensure_ascii=False, indent=2)
 
