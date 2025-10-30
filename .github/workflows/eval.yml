@@ -3,7 +3,7 @@ name: evaluate
 on:
   workflow_dispatch:
   schedule:
-    - cron: "30 20 * * *"  # 20:30 UTC veče, prilagodi
+    - cron: "30 20 * * *"   # 20:30 UTC
 
 jobs:
   eval:
@@ -17,12 +17,28 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      # 1. povuci public iz JUTARNJEG runa
-      - name: Download morning pages artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: github-pages
-          path: ./public
+      # 1) Nađi i skini POSLEDNJI artifact koji se zove "github-pages"
+      - name: Download latest pages artifact via API
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -e
+          mkdir -p public
+          echo "Listing artifacts..."
+          ARTIFACT_ID=$(curl -s -H "Authorization: Bearer $GH_TOKEN" \
+            https://api.github.com/repos/$REPO/actions/artifacts?per_page=100 \
+            | jq -r '.artifacts[] | select(.name=="github-pages") | .id' | head -n 1)
+          if [ -z "$ARTIFACT_ID" ]; then
+            echo "No artifact named github-pages found"
+            exit 1
+          fi
+          echo "Latest artifact id: $ARTIFACT_ID"
+          curl -L -H "Authorization: Bearer $GH_TOKEN" \
+            https://api.github.com/repos/$REPO/actions/artifacts/$ARTIFACT_ID/zip \
+            -o artifact.zip
+          unzip -o artifact.zip -d public
+          ls -l public
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -34,19 +50,18 @@ jobs:
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
-      # 2. pokreni evaluaciju NAD TIM fajlovima
+      # 2) Evaluacija NAD jutarnjim fajlovima
       - name: Run evaluation
         run: |
           python evaluate_results.py
           ls -l public
 
-      # 3. uploaduj ISTI folder: 2plus.json, 3plus.json, 4plus.json, daily_log.json, evaluation.json
+      # 3) Upload kombinovanog foldera (jutro + evaluation.json)
       - name: Upload evaluated pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
           path: ./public
 
-      # 4. deploy na GitHub Pages
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
