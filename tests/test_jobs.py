@@ -91,7 +91,7 @@ def test_evening_evaluation_from_snapshot(tmp_path, monkeypatch):
         return {
             101: {"status": "FT", "home_goals": 2, "away_goals": 0},
             102: {"status": "FT", "home_goals": 1, "away_goals": 1},
-            103: {"status": "FT", "home_goals": 3, "away_goals": 0},
+            103: {"status": "NS", "home_goals": None, "away_goals": None},
         }[fid]
 
     monkeypatch.setattr(evaluate_results, "fetch_fixture_result", fake_fetch)
@@ -109,8 +109,68 @@ def test_evening_evaluation_from_snapshot(tmp_path, monkeypatch):
 
     assert labels["2plus"]["all_hit"] is True
     assert labels["2plus"]["total_label"].endswith("✅")
-    assert labels["3plus"]["all_hit"] is True
+    assert labels["3plus"]["all_hit"] is False
     leg_results = [leg["result"]["hit"] for leg in labels["2plus"]["legs"]]
     assert leg_results == [True, True]
 
-    assert labels["3plus"]["legs"][0]["result"]["emoji"] == "✅"
+    assert labels["3plus"]["legs"][0]["result"]["emoji"] == "❌"
+
+    ticket_file = out_dir / "eval_2plus.json"
+    assert ticket_file.exists()
+    with ticket_file.open("r", encoding="utf-8") as fh:
+        ticket_eval = json.load(fh)
+
+    assert ticket_eval == {
+        "ticket_result": "win",
+        "legs": [
+            {"fixture_id": 101, "result": "win", "score_ft": "2-0"},
+            {"fixture_id": 102, "result": "win", "score_ft": "1-1"},
+        ],
+    }
+
+    three_plus = out_dir / "eval_3plus.json"
+    assert three_plus.exists()
+    with three_plus.open("r", encoding="utf-8") as fh:
+        data = json.load(fh)
+
+    assert data["ticket_result"] == "pending"
+    assert data["legs"] == [{"fixture_id": 103, "result": "pending"}]
+
+    four_plus = out_dir / "eval_4plus.json"
+    with four_plus.open("r", encoding="utf-8") as fh:
+        data = json.load(fh)
+
+    assert data == {"ticket_result": "pending", "legs": []}
+
+
+def test_ticket_eval_loss_file(tmp_path, monkeypatch):
+    focus_bets = importlib.import_module("focus_bets")
+    out_dir = tmp_path / "public"
+    focus_bets.OUT_DIR = out_dir
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    legs = sample_legs()
+    focus_bets.write_pages("2024-04-01", [legs[:2], [legs[2]], []])
+
+    evaluate_results = importlib.import_module("evaluate_results")
+    evaluate_results.PUBLIC = out_dir
+
+    def fake_fetch(fid):
+        return {
+            101: {"status": "FT", "home_goals": 0, "away_goals": 1},
+            102: {"status": "FT", "home_goals": 1, "away_goals": 0},
+            103: {"status": "FT", "home_goals": 0, "away_goals": 3},
+        }[fid]
+
+    monkeypatch.setattr(evaluate_results, "fetch_fixture_result", fake_fetch)
+
+    evaluate_results.main()
+
+    ticket_file = out_dir / "eval_2plus.json"
+    with ticket_file.open("r", encoding="utf-8") as fh:
+        ticket_eval = json.load(fh)
+
+    assert ticket_eval["ticket_result"] == "lose"
+    assert ticket_eval["legs"][0]["result"] == "lose"
+    assert ticket_eval["legs"][1]["result"] == "lose"
+    assert ticket_eval["legs"][0]["score_ft"] == "0-1"
