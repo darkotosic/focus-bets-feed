@@ -1,45 +1,52 @@
 name: evaluate
+
 on:
-  schedule:
-    - cron: "30 21 * * *"  # 21:30 UTC
   workflow_dispatch:
+  schedule:
+    - cron: "30 20 * * *"  # 20:30 UTC veče, prilagodi
 
 jobs:
   eval:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+      actions: read
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repo
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      # 1. povuci public iz JUTARNJEG runa
+      - name: Download morning pages artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: github-pages
+          path: ./public
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
       - name: Install deps
         run: |
-          pip install -r requirements.txt
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
-      - name: Evaluate tickets
-        env:
-          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
+      # 2. pokreni evaluaciju NAD TIM fajlovima
+      - name: Run evaluation
         run: |
           python evaluate_results.py
-          ls -R .
+          ls -l public
 
-      - name: Upload artifact
+      # 3. uploaduj ISTI folder: 2plus.json, 3plus.json, 4plus.json, daily_log.json, evaluation.json
+      - name: Upload evaluated pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
           path: ./public
 
-  deploy:
-    needs: eval
-    runs-on: ubuntu-latest
-    permissions:
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
+      # 4. deploy na GitHub Pages
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
