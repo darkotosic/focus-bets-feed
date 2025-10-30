@@ -17,7 +17,6 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      # 1) Nađi i skini POSLEDNJI artifact koji se zove "github-pages"
       - name: Download latest pages artifact via API
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -25,20 +24,28 @@ jobs:
         run: |
           set -e
           mkdir -p public
-          echo "Listing artifacts..."
+          mkdir -p tmp_art
           ARTIFACT_ID=$(curl -s -H "Authorization: Bearer $GH_TOKEN" \
             https://api.github.com/repos/$REPO/actions/artifacts?per_page=100 \
             | jq -r '.artifacts[] | select(.name=="github-pages") | .id' | head -n 1)
           if [ -z "$ARTIFACT_ID" ]; then
-            echo "No artifact named github-pages found"
+            echo "no github-pages artifact found"
             exit 1
           fi
-          echo "Latest artifact id: $ARTIFACT_ID"
           curl -L -H "Authorization: Bearer $GH_TOKEN" \
             https://api.github.com/repos/$REPO/actions/artifacts/$ARTIFACT_ID/zip \
             -o artifact.zip
-          unzip -o artifact.zip -d public
-          ls -l public
+          unzip -o artifact.zip -d tmp_art
+
+          # sada imamo tmp_art/public/... pa to prebacujemo u ./public
+          if [ -d tmp_art/public ]; then
+            cp -r tmp_art/public/* public/
+          else
+            # ako je nekad zip bez public/ foldera, kopiraj sve
+            cp -r tmp_art/* public/
+          fi
+
+          ls -R public
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -50,13 +57,11 @@ jobs:
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
-      # 2) Evaluacija NAD jutarnjim fajlovima
       - name: Run evaluation
         run: |
           python evaluate_results.py
           ls -l public
 
-      # 3) Upload kombinovanog foldera (jutro + evaluation.json)
       - name: Upload evaluated pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
