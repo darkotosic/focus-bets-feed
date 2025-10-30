@@ -2,52 +2,40 @@ name: evaluate
 
 on:
   schedule:
-    - cron: "30 20 * * *"   # 21:30 Beograd (20:30 UTC)
+    - cron: "15 21 * * *"  # 23:45/00:45 BG
   workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
 
 jobs:
   eval:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      # 1️⃣ Preuzmi artifact iz jutarnjeg feeda
-      - name: Download morning artifact
-        uses: actions/download-artifact@v4
+      - uses: actions/setup-python@v5
         with:
-          name: github-pages
-          path: public
+          python-version: "3.11"
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
+      - run: pip install httpx
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install httpx
-
-      # 2️⃣ Pokreni evaluaciju nad jutarnjim snapshotom
       - name: Evaluate results
         env:
           API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
-          API_FOOTBALL_URL: ${{ secrets.API_FOOTBALL_URL }}
-        run: |
-          python evaluate_results.py
-          echo "Evaluation done"
-          ls -lah public
-          cat public/evaluation.json || true
+        run: python evaluate_results.py
 
-      # 3️⃣ Upload kombinovanih rezultata za Pages
-      - name: Upload evaluated pages artifact
+      - name: Upload GitHub Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
           path: public
 
-      # 4️⃣ Deploy na GitHub Pages
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
+  deploy:
+    needs: eval
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/deploy-pages@v4
+        with:
+          token: ${{ secrets.PAGES_DEPLOY_TOKEN }}
