@@ -119,13 +119,25 @@ def main() -> None:
     date_str = snap.get("date") or datetime.now(timezone.utc).strftime("%Y-%m-%d")
     evaluated_tickets = []
 
+    per_ticket_payloads = []
+
     for ticket in snap.get("tickets", []):
         legs = ticket.get("legs") or []
         out_legs = []
+        simple_legs = []
         all_hit = True
+        any_pending = False
+        has_loss = False
         for leg in legs:
             fid = leg.get("fid")
-            res = fetch_fixture_result(int(fid))
+            try:
+                fetch_id = int(str(fid))
+            except (TypeError, ValueError):
+                fetch_id = None
+            if fetch_id is None:
+                res = {"status": "NA", "home_goals": None, "away_goals": None}
+            else:
+                res = fetch_fixture_result(fetch_id)
             ok = leg_hit(
                 {
                     "market": leg.get("market"),
@@ -135,6 +147,22 @@ def main() -> None:
             )
             if not ok:
                 all_hit = False
+            status = res.get("status")
+            is_final = status in {"FT", "AET", "PEN"}
+            if not is_final:
+                any_pending = True
+            elif not ok:
+                has_loss = True
+            fixture_id = fetch_id
+            leg_summary = {
+                "fixture_id": fixture_id,
+                "result": "win" if ok and is_final else ("pending" if not is_final else "lose"),
+            }
+            hg = res.get("home_goals")
+            ag = res.get("away_goals")
+            if is_final and hg is not None and ag is not None:
+                leg_summary["score_ft"] = f"{hg}-{ag}"
+            simple_legs.append(leg_summary)
             out_legs.append(
                 {
                     **leg,
@@ -152,6 +180,31 @@ def main() -> None:
         label = f"{total_odds:.2f}"
         if all_hit and legs:
             label = f"{label} ✅"
+
+        ticket_slug = str(ticket.get("name") or ticket.get("target") or "ticket").strip()
+        if not ticket_slug:
+            ticket_slug = "ticket"
+        ticket_slug = ticket_slug.replace(" ", "_")
+
+        has_legs = bool(legs)
+
+        if has_loss:
+            ticket_result = "lose"
+        elif any_pending:
+            ticket_result = "pending"
+        elif has_legs and all_hit:
+            ticket_result = "win"
+        elif not has_legs:
+            ticket_result = "pending"
+        else:
+            ticket_result = "lose"
+
+        per_ticket_payloads.append(
+            {
+                "slug": ticket_slug,
+                "payload": {"ticket_result": ticket_result, "legs": simple_legs},
+            }
+        )
 
         evaluated_tickets.append(
             {
@@ -171,6 +224,11 @@ def main() -> None:
 
     with open(PUBLIC / "evaluation.json", "w", encoding="utf-8") as f:
         json.dump(out_obj, f, ensure_ascii=False, indent=2)
+
+    for item in per_ticket_payloads:
+        out_path = PUBLIC / f"eval_{item['slug']}.json"
+        with open(out_path, "w", encoding="utf-8") as fh:
+            json.dump(item["payload"], fh, ensure_ascii=False, indent=2)
 
     print(json.dumps({"status": "ok", "file": "public/evaluation.json"}, ensure_ascii=False))
 
