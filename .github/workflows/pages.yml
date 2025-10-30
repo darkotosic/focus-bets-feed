@@ -35,8 +35,8 @@ jobs:
           LEGS_MAX: "7"
           MAX_PER_COUNTRY: "3"
           MAX_HEAVY_FAVORITES: "2"
-          RELAX_STEPS: "6"
-          RELAX_ADD: "0.03"
+          RELAX_STEPS: "7"
+          RELAX_ADD: "0.05"
         run: python focus_bets.py
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
