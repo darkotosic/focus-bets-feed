@@ -2,26 +2,34 @@ name: feed
 
 on:
   schedule:
-    - cron: "0 6 * * *"   # 07:00 Beograd (06:00 UTC)
+    - cron: "15 4 * * *"   # 06:15 Europe/Belgrade
   workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: true
 
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.11"
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install httpx
+      - uses: actions/configure-pages@v5
+        with:
+          token: ${{ secrets.PAGES_DEPLOY_TOKEN }}
+          enablement: true
+
+      - run: pip install -r requirements.txt
 
       - name: Generate daily JSON feed
         env:
@@ -34,19 +42,8 @@ jobs:
           MAX_HEAVY_FAVORITES: "2"
           RELAX_STEPS: "7"
           RELAX_ADD: "0.05"
-        run: |
-          python focus_bets.py
-          echo "Public dir content:"
-          ls -lah public
+        run: python focus_bets.py
 
-      # 1️⃣ Upload običan artifact za večernji eval workflow
-      - name: Upload standard artifact for evaluation
-        uses: actions/upload-artifact@v4
-        with:
-          name: github-pages
-          path: public
-
-      # 2️⃣ Upload Pages artifact za GitHub Pages
       - name: Upload GitHub Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
@@ -55,14 +52,11 @@ jobs:
   deploy:
     needs: build
     runs-on: ubuntu-latest
-    permissions:
-      pages: write
-      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
-
     steps:
-      - name: Deploy to GitHub Pages
-        id: deployment
+      - id: deployment
         uses: actions/deploy-pages@v4
+        with:
+          token: ${{ secrets.PAGES_DEPLOY_TOKEN }}
