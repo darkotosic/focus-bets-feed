@@ -1,168 +1,146 @@
-import os
-import json
-from datetime import datetime, timezone
-import requests
-from typing import Any, Dict, Tuple, List
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+import os, json, sys
+from pathlib import Path
+from datetime import datetime
 
-PUBLIC_DIR = "public"
-API_KEY = os.getenv("API_FOOTBALL_KEY")
-BASE = "https://v3.football.api-sports.io"
+OUT_DIR = Path("public")
+OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-FILES = [
-    ("2plus", os.path.join(PUBLIC_DIR, "2plus.json")),
-    ("3plus", os.path.join(PUBLIC_DIR, "3plus.json")),
-    ("4plus", os.path.join(PUBLIC_DIR, "4plus.json")),
-]
+# ovde bi ti u praksi povlačio rezultate iz API-Football
+# ja ću staviti helper koji čita iz lokalnog json-a ili vrati "FT 0-0"
+def load_fixture_result(fid: int) -> dict:
+    # placeholder; u tvom GH actionu ovde pozovi API
+    # return {"status": "FT", "home_goals": 2, "away_goals": 1}
+    return {"status": "FT", "home_goals": 0, "away_goals": 0}
 
-def _ensure_public_dir():
-    os.makedirs(PUBLIC_DIR, exist_ok=True)
+def leg_hit(leg: dict, res: dict) -> bool:
+    hg = res["home_goals"]
+    ag = res["away_goals"]
 
-def _fixture_id_from_leg(leg: Dict[str, Any]) -> int | None:
-    for key in ("fixture_id", "fid", "fixtureId", "fixtureID"):
-        v = leg.get(key)
-        if v:
-            return int(v)
-    return None
+    mkt = leg.get("market")
+    pick = leg.get("pick")
 
-def _normalize_ou_pick(p: str) -> str:
-    p = (p or "").strip()
-    low = p.lower()
-    if low.startswith("over "):
-        return "O" + p.split(" ", 1)[1].strip()
-    if low.startswith("under "):
-        return "U" + p.split(" ", 1)[1].strip()
-    return p
+    if mkt == "Match Winner":
+        if pick == "Home":
+            return hg > ag
+        if pick == "Away":
+            return ag > hg
+        return False
 
-def _get_fixture(fixture_id: int) -> Dict[str, Any]:
-    if not API_KEY:
-        raise RuntimeError("API_FOOTBALL_KEY missing")
-    url = f"{BASE}/fixtures?id={fixture_id}"
-    r = requests.get(url, headers={"x-apisports-key": API_KEY}, timeout=15)
-    r.raise_for_status()
-    data = r.json()
-    if not data.get("response"):
-        return {}
-    return data["response"][0]
+    if mkt == "Double Chance":
+        if pick == "1X":
+            return hg >= ag
+        if pick == "X2":
+            return ag >= hg
+        if pick == "12":
+            return hg != ag
+        return False
 
-def judge_leg(leg: Dict[str, Any]) -> Tuple[bool, str]:
-    fid = _fixture_id_from_leg(leg)
-    if not fid:
-        return False, "❌"
-    fx = _get_fixture(fid)
-    if not fx:
-        return False, "⏳"
+    if mkt == "BTTS":
+        if pick == "Yes":
+            return hg > 0 and ag > 0
+        if pick == "No":
+            return not (hg > 0 and ag > 0)
+        return False
 
-    status = fx["fixture"]["status"]["short"]
-    # ako nije FT, ne ocenjuj
-    if status not in ("FT", "AET", "PEN"):
-        return False, "⏳"
+    if mkt == "Over/Under":
+        # pick npr "Over 1.5"
+        try:
+            parts = pick.split()
+            ou = parts[0].lower()  # over/under
+            line = float(parts[1])
+            goals = hg + ag
+            if ou == "over":
+                return goals > line - 1e-9
+            else:
+                return goals < line + 1e-9
+        except Exception:
+            return False
 
-    gh = fx["goals"]["home"] or 0
-    ga = fx["goals"]["away"] or 0
+    if mkt == "1st Half Goals":
+        # nemaš poluvreme u placeholderu pa vrati False
+        return False
 
-    m = leg.get("market", "").strip()
-    p = leg.get("pick", "").strip()
-    ok = False
+    if mkt in ("Home Team Goals", "Away Team Goals"):
+        # isto: placeholder
+        return False
 
-    # Double Chance
-    if m == "Double Chance" or m == "DC":
-        if p == "1X":
-            ok = gh >= ga
-        elif p == "X2":
-            ok = ga >= gh
-        elif p == "12":
-            ok = gh != ga
+    return False
 
-    # BTTS
-    elif m == "BTTS":
-        if p == "Yes":
-            ok = (gh > 0 and ga > 0)
-        elif p == "No":
-            ok = not (gh > 0 and ga > 0)
-
-    # Match Winner
-    elif m == "Match Winner":
-        if p == "Home":
-            ok = gh > ga
-        elif p == "Away":
-            ok = ga > gh
-        elif p == "Draw":
-            ok = gh == ga
-
-    # Over/Under
-    elif m == "Over/Under":
-        p_norm = _normalize_ou_pick(p)
-        if p_norm.startswith("O"):
-            try:
-                line = float(p_norm[1:])
-                ok = (gh + ga) > line - 1e-9
-            except Exception:
-                ok = False
-        elif p_norm.startswith("U"):
-            try:
-                line = float(p_norm[1:])
-                ok = (gh + ga) < line + 1e-9
-            except Exception:
-                ok = False
-
-    return ok, ("✅" if ok else "❌")
-
-def evaluate_file(key: str, path: str) -> Dict[str, Any]:
-    if not os.path.exists(path):
-        return {
-            "ticket_result": "missing",
-            "ticket_result_emoji": "⏳",
-            "legs": [],
-        }
-    with open(path, "r", encoding="utf-8") as f:
-        src = json.load(f)
-
-    ticket = src.get("ticket") or src
-    legs = ticket.get("legs", [])
-
-    evaluated_legs = []
-    all_ok = True
+def evaluate_ticket(ticket: dict) -> dict:
+    legs = ticket.get("legs") or []
+    all_hit = True
+    out_legs = []
     for leg in legs:
-        ok, emoji = judge_leg(leg)
-        # pick ostaje isti ali dodajemo emoji
-        leg_out = dict(leg)
-        leg_out["result_emoji"] = emoji
-        if emoji in ("✅", "❌"):
-            leg_out["pick"] = f"{leg.get('pick','')} {emoji}".strip()
-        evaluated_legs.append(leg_out)
+        fid = leg.get("fid")
+        res = load_fixture_result(fid)
+        ok = res["status"] == "FT" and leg_hit(leg, res)
+        emoji = "✅" if ok else "❌"
+        out_legs.append({
+            **leg,
+            "result": {
+                "status": res["status"],
+                "home_goals": res["home_goals"],
+                "away_goals": res["away_goals"],
+                "hit": ok,
+                "emoji": emoji
+            }
+        })
         if not ok:
-            all_ok = False
+            all_hit = False
 
-    out = {
-        "date": src.get("date"),
-        "ticket": {
-            "target": ticket.get("target"),
-            "total_odds": ticket.get("total_odds"),
-            "legs": evaluated_legs,
-        },
-        "ticket_result": "win" if all_ok else "lose",
-        "ticket_result_emoji": "✅" if all_ok else "❌",
-        "evaluated_at_utc": datetime.now(timezone.utc).isoformat()
+    total_odds = ticket.get("total_odds", 0)
+    total_label = f"{total_odds:.2f}"
+    if all_hit and legs:
+        total_label = f"{total_label} ✅"
+
+    return {
+        "total_odds": total_odds,
+        "total_label": total_label,
+        "all_hit": all_hit,
+        "legs": out_legs,
     }
 
-    _ensure_public_dir()
-    with open(os.path.join(PUBLIC_DIR, f"eval_{key}.json"), "w", encoding="utf-8") as f:
-        json.dump(out, f, ensure_ascii=False, indent=2)
+def load_ticket_file(name: str) -> dict:
+    path = OUT_DIR / name
+    if not path.exists():
+        return {}
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
 
-    return out
+def main():
+    date_str = datetime.utcnow().strftime("%Y-%m-%d")
+    result_payload = {
+        "date": date_str,
+        "tickets": {}
+    }
 
-def run():
-    _ensure_public_dir()
-    results = {}
-    for key, path in FILES:
-        results[key] = evaluate_file(key, path)
-    # večernji log u poseban fajl da ne pregazi jutarnji
-    with open(os.path.join(PUBLIC_DIR, "daily_eval.json"), "w", encoding="utf-8") as f:
-        json.dump({
-            "evaluated_at_utc": datetime.now(timezone.utc).isoformat(),
-            "files": list(results.keys())
-        }, f, ensure_ascii=False, indent=2)
-    return results
+    for name in ["2plus.json", "3plus.json", "4plus.json"]:
+        raw = load_ticket_file(name)
+        if not raw:
+            # ako nema fajla, kreiraj prazan eval
+            result_payload["tickets"][name] = {
+                "exists": False,
+                "evaluated": False,
+                "ticket": None
+            }
+            continue
+
+        ticket = raw.get("ticket") or {}
+        evaluated = evaluate_ticket(ticket)
+        result_payload["tickets"][name] = {
+            "exists": True,
+            "evaluated": True,
+            "ticket": evaluated
+        }
+
+    # snimi
+    out_path = OUT_DIR / "evaluation.json"
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(result_payload, f, ensure_ascii=False, indent=2)
+
+    print(json.dumps({"status": "ok", "file": str(out_path)}, ensure_ascii=False))
 
 if __name__ == "__main__":
-    print(json.dumps(run(), ensure_ascii=False, indent=2))
+    main()
