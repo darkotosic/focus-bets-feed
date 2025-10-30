@@ -379,7 +379,7 @@ def build_three_tickets(date_str: str) -> List[List[Dict[str, Any]]]:
     used: set[int] = set()
     caps = dict(BASE_TH)
 
-    # === GLAVNI DEO: pravi 2+ i 3+ tikete normalno ===
+    # === GLAVNI DEO: pravi 2+, 3+ i 4+ normalno ===
     for step in range(RELAX_STEPS + 1):
         legs = assemble_legs(date_str, caps)
         for idx, target in enumerate(TARGETS, start=1):
@@ -389,32 +389,37 @@ def build_three_tickets(date_str: str) -> List[List[Dict[str, Any]]]:
             if built:
                 tickets.append(built)
                 used.update(x["fid"] for x in built)
-                _log(f"🎫 ticket#{len(tickets)} target={target} legs={len(built)} total={_product([x['odd'] for x in built]):.2f}")
+                total = _product([x["odd"] for x in built])
+                _log(f"🎫 ticket#{len(tickets)} target={target} legs={len(built)} total={total:.2f}")
         if len(tickets) >= 3:
             break
         caps = {k: (v + RELAX_ADD) for k, v in caps.items()}
         _log(f"↘ relax step={step+1} caps+= {RELAX_ADD}")
 
-    # === Fallback za 4+ tiket (sigurnija varijanta) ===
+    # === FALLBACK samo ako nema 4+ tiketa ===
     if len(tickets) < 3:
         target_4 = TARGETS[2] if len(TARGETS) >= 3 else 4.0
-        _log("⚠️ 4plus fallback (safe mode): koristi NAJNIŽE kvote globalno, do ukupno 4.0+")
+        _log("⚠️ 4plus fallback (BTTS mode): koristi SVE lige, samo BTTS kvote <1.45")
         all_fixtures = fetch_all_fixtures_no_filter(date_str)
         legs_all = assemble_legs_from_fixtures(all_fixtures, caps)
 
-        # Sortiraj po kvoti RASTUĆE — prvo male kvote (1.15–1.75)
-        legs_all.sort(key=lambda L: L["odd"])
+        # Filtriraj samo BTTS tržišta i kvote <1.45
+        btts_legs = [
+            l for l in legs_all
+            if l["market"] == "BTTS" and l["odd"] < 1.45
+        ]
+
+        # Sortiraj po kvoti rastuće — sigurnije prvo
+        btts_legs.sort(key=lambda L: L["odd"])
 
         fallback_ticket: List[Dict[str, Any]] = []
         odds_prod = 1.0
 
-        for leg in legs_all:
-            # Ignoriši ekstremno visoke kvote (npr. > 1.75) jer nisu “sigurne”
-            if leg["odd"] > 1.75:
+        for leg in btts_legs:
+            if leg["fid"] in used:
                 continue
             fallback_ticket.append(leg)
             odds_prod *= leg["odd"]
-
             if len(fallback_ticket) >= LEGS_MIN and odds_prod >= target_4:
                 break
             if len(fallback_ticket) >= LEGS_MAX:
@@ -423,9 +428,9 @@ def build_three_tickets(date_str: str) -> List[List[Dict[str, Any]]]:
         if len(fallback_ticket) >= LEGS_MIN:
             tickets.append(fallback_ticket)
             total = _product([x["odd"] for x in fallback_ticket])
-            _log(f"✅ 4plus fallback (safe) napravljen legs={len(fallback_ticket)} total={total:.2f}")
+            _log(f"✅ 4plus fallback (BTTS safe) legs={len(fallback_ticket)} total={total:.2f}")
         else:
-            _log("❌ 4plus fallback (safe) nije uspeo da sklopi tiket")
+            _log("❌ 4plus fallback (BTTS) nije uspeo da sklopi tiket")
 
     return tickets[:3]
 
