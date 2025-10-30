@@ -1,31 +1,23 @@
 name: feed
-
 on:
   schedule:
-    - cron: "15 4 * * *"   # 06:15 Belgrade
+    - cron: "0 6 * * *"  # 06:00 UTC
   workflow_dispatch:
-
-permissions:
-  contents: read
-  pages: write
-  id-token: write
-
-concurrency:
-  group: "pages"
-  cancel-in-progress: true
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
-        with: { python-version: "3.11" }
-      - uses: actions/configure-pages@v5
         with:
-          token: ${{ secrets.PAGES_DEPLOY_TOKEN }}
-          enablement: true
-      - run: pip install -r requirements.txt
+          python-version: "3.12"
+
+      - name: Install deps
+        run: |
+          pip install -r requirements.txt
+
       - name: Generate JSON feed
         env:
           API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
@@ -37,19 +29,25 @@ jobs:
           MAX_HEAVY_FAVORITES: "2"
           RELAX_STEPS: "7"
           RELAX_ADD: "0.05"
-        run: python focus_bets.py
+        run: |
+          python focus_bets.py
+          ls -R .
+
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: public
+          path: ./public
+
   deploy:
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - id: deployment
+      - name: Deploy to GitHub Pages
+        id: deployment
         uses: actions/deploy-pages@v4
-        with:
-          token: ${{ secrets.PAGES_DEPLOY_TOKEN }}
