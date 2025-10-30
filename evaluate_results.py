@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-import os, json
+import json
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -8,8 +8,7 @@ OUT_DIR = Path("public")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 def load_fixture_result(fid: int) -> dict:
-    # ovde ide pravi API-Football poziv
-    # sada sve FT 0-0 da ne puca
+    # TODO: zameniti realnim API-Football pozivom
     return {
         "status": "FT",
         "home_goals": 0,
@@ -17,13 +16,12 @@ def load_fixture_result(fid: int) -> dict:
     }
 
 def leg_hit(leg: dict, res: dict) -> bool:
+    if res.get("status") != "FT":
+        return False
     hg = res["home_goals"]
     ag = res["away_goals"]
     mkt = leg.get("market")
     pick = leg.get("pick")
-
-    if res["status"] != "FT":
-        return False
 
     if mkt == "Match Winner":
         if pick == "Home":
@@ -43,7 +41,7 @@ def leg_hit(leg: dict, res: dict) -> bool:
 
     if mkt == "BTTS":
         if pick == "Yes":
-            return (hg > 0 and ag > 0)
+            return hg > 0 and ag > 0
         if pick == "No":
             return not (hg > 0 and ag > 0)
         return False
@@ -51,7 +49,7 @@ def leg_hit(leg: dict, res: dict) -> bool:
     if mkt == "Over/Under":
         try:
             parts = pick.split()
-            ou = parts[0].lower()   # over / under
+            ou = parts[0].lower()
             line = float(parts[1])
             goals = hg + ag
             if ou == "over":
@@ -61,14 +59,12 @@ def leg_hit(leg: dict, res: dict) -> bool:
         except Exception:
             return False
 
-    # za ostala tržišta nemamo podatke u placeholderu
     return False
 
 def evaluate_ticket(ticket: dict) -> dict:
     legs = ticket.get("legs") or []
     all_hit = True
     out_legs = []
-
     for leg in legs:
         fid = leg.get("fid")
         res = load_fixture_result(fid)
@@ -99,42 +95,37 @@ def evaluate_ticket(ticket: dict) -> dict:
     }
 
 def load_ticket_file(name: str) -> dict:
-    path = OUT_DIR / name
-    if not path.exists():
+    p = OUT_DIR / name
+    if not p.exists():
         return {}
-    with open(path, "r", encoding="utf-8") as f:
+    with open(p, "r", encoding="utf-8") as f:
         return json.load(f)
 
 def main():
     date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    result = {
-        "date": date_str,
-        "tickets": {}
-    }
+    out = {"date": date_str, "tickets": {}}
 
     for name in ["2plus.json", "3plus.json", "4plus.json"]:
         raw = load_ticket_file(name)
         if not raw:
-            result["tickets"][name] = {
+            out["tickets"][name] = {
                 "exists": False,
                 "evaluated": False,
                 "ticket": None
             }
             continue
-
         ticket = raw.get("ticket") or {}
         evaluated = evaluate_ticket(ticket)
-        result["tickets"][name] = {
+        out["tickets"][name] = {
             "exists": True,
             "evaluated": True,
             "ticket": evaluated
         }
 
-    out_path = OUT_DIR / "evaluation.json"
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(result, f, ensure_ascii=False, indent=2)
+    with open(OUT_DIR / "evaluation.json", "w", encoding="utf-8") as f:
+        json.dump(out, f, ensure_ascii=False, indent=2)
 
-    print(json.dumps({"status": "ok", "file": str(out_path)}, ensure_ascii=False))
+    print(json.dumps({"status": "ok", "file": "public/evaluation.json"}, ensure_ascii=False))
 
 if __name__ == "__main__":
     main()
