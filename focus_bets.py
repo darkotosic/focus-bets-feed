@@ -17,7 +17,6 @@ BASE_URL = os.getenv("API_FOOTBALL_URL", "https://v3.football.api-sports.io").rs
 TIMEZONE = os.getenv("TIMEZONE", "Europe/Belgrade")
 TZ = ZoneInfo(TIMEZONE)
 
-# ciljevi ostaju kao i ranije
 TARGETS = [float(x) for x in os.getenv("TICKET_TARGETS", "2.0,3.0,4.0").split(",")]
 LEGS_MIN = int(os.getenv("LEGS_MIN", "3"))
 LEGS_MAX = int(os.getenv("LEGS_MAX", "7"))
@@ -137,15 +136,6 @@ def _normalize_ou_value(v: str) -> str:
     s = re.sub(r"\s+", " ", s.title())
     return s
 
-def _norm_over05(val: str) -> bool:
-    return re.search(r"(?i)\bover\s*0\.5\b", val or "") is not None
-
-def _value_mentions_home(val: str) -> bool:
-    return re.search(r"(?i)\bhome\b", val or "") is not None
-
-def _value_mentions_away(val: str) -> bool:
-    return re.search(r"(?i)\baway\b", val or "") is not None
-
 def best_market_odds(odds_resp: List[Dict[str, Any]]) -> Dict[str, Dict[str, float]]:
     best: Dict[str, Dict[str, float]] = {}
 
@@ -167,7 +157,7 @@ def best_market_odds(odds_resp: List[Dict[str, Any]]) -> Dict[str, Dict[str, flo
                 # 1st half
                 if _is_market_named(raw, DOC_MARKETS["ou_1st"]):
                     for v in bet.get("values", []) or []:
-                        if _norm_over05(v.get("value") or ""):
+                        if re.search(r"(?i)\bover\s*0\.5\b", v.get("value") or ""):
                             put("1st Half Goals", "Over 0.5", v.get("odd"))
                     continue
 
@@ -206,24 +196,23 @@ def best_market_odds(odds_resp: List[Dict[str, Any]]) -> Dict[str, Dict[str, flo
 
                 if _is_market_named(raw, DOC_MARKETS["ttg_home"]):
                     for v in bet.get("values", []) or []:
-                        if _norm_over05(v.get("value") or ""):
+                        if re.search(r"(?i)\bover\s*0\.5\b", v.get("value") or ""):
                             put("Home Team Goals", "Over 0.5", v.get("odd"))
                     continue
 
                 if _is_market_named(raw, DOC_MARKETS["ttg_away"]):
                     for v in bet.get("values", []) or []:
-                        if _norm_over05(v.get("value") or ""):
+                        if re.search(r"(?i)\bover\s*0\.5\b", v.get("value") or ""):
                             put("Away Team Goals", "Over 0.5", v.get("odd"))
                     continue
 
                 if _is_market_named(raw, DOC_MARKETS["ttg_generic"]):
                     for v in bet.get("values", []) or []:
-                        vv = (v.get("value") or "").strip()
-                        if _norm_over05(vv):
-                            if _value_mentions_home(vv):
-                                put("Home Team Goals", "Over 0.5", v.get("odd"))
-                            elif _value_mentions_away(vv):
-                                put("Away Team Goals", "Over 0.5", v.get("odd"))
+                        vv = (v.get("value") or "").strip().lower()
+                        if "over 0.5" in vv and "home" in vv:
+                            put("Home Team Goals", "Over 0.5", v.get("odd"))
+                        elif "over 0.5" in vv and "away" in vv:
+                            put("Away Team Goals", "Over 0.5", v.get("odd"))
                     continue
 
     return best
@@ -242,7 +231,6 @@ def fetch_fixtures(date_str: str) -> List[Dict[str, Any]]:
     return out
 
 def fetch_all_fixtures_no_filter(date_str: str) -> List[Dict[str, Any]]:
-    # koristi se samo u fallbacku za 4+ da uzme SVE mečeve tog dana
     items = _get("/fixtures", {"date": date_str}).get("response") or []
     out = []
     for f in items:
@@ -263,7 +251,7 @@ def assemble_legs_from_fixtures(fixtures: List[Dict[str, Any]], caps: Dict[Tuple
         lg = f.get("league", {}) or {}
         tm = f.get("teams", {}) or {}
         fid = int(fx.get("id"))
-        when = _fmt_dt_local(fx.get("date", ""))
+        when_local = _fmt_dt_local(fx.get("date", ""))
         home = (tm.get("home") or {})
         away = (tm.get("away") or {})
         resp = odds_by_fixture(fid)
@@ -282,6 +270,8 @@ def assemble_legs_from_fixtures(fixtures: List[Dict[str, Any]], caps: Dict[Tuple
                     pick_name = name
                     pick_odd = odd
         if pick_mkt:
+            # OVDE SPAJAMO DATUM + FID
+            display_time = f"{when_local} • {fid}"
             legs.append({
                 "fid": fid,
                 "country": (lg.get("country") or "").strip() or "World",
@@ -290,7 +280,7 @@ def assemble_legs_from_fixtures(fixtures: List[Dict[str, Any]], caps: Dict[Tuple
                 "home_name": home.get("name") or "",
                 "away_name": away.get("name") or "",
                 "teams": f"{home.get('name','')} vs {away.get('name','')}",
-                "time": when,
+                "time": display_time,  # app prikazuje ovo
                 "market": pick_mkt,
                 "pick_name": pick_name,
                 "odd": float(pick_odd)
@@ -367,7 +357,7 @@ def _ticket_json(legs: List[Dict[str, Any]]) -> Dict[str, Any]:
             "fid": l["fid"],
             "league": l["league"],
             "teams": l["teams"],
-            "time": l["time"],
+            "time": l["time"],  # vec sadrzi • fid
             "market": l["market"],
             "pick": l["pick_name"],
             "odds": round(float(l["odd"]), 2)
@@ -379,7 +369,6 @@ def build_three_tickets(date_str: str) -> List[List[Dict[str, Any]]]:
     used: set[int] = set()
     caps = dict(BASE_TH)
 
-    # === GLAVNI DEO: pravi 2+, 3+ i 4+ normalno ===
     for step in range(RELAX_STEPS + 1):
         legs = assemble_legs(date_str, caps)
         for idx, target in enumerate(TARGETS, start=1):
@@ -396,25 +385,17 @@ def build_three_tickets(date_str: str) -> List[List[Dict[str, Any]]]:
         caps = {k: (v + RELAX_ADD) for k, v in caps.items()}
         _log(f"↘ relax step={step+1} caps+= {RELAX_ADD}")
 
-    # === FALLBACK samo ako nema 4+ tiketa ===
+    # FALLBACK za 4+
     if len(tickets) < 3:
         target_4 = TARGETS[2] if len(TARGETS) >= 3 else 4.0
         _log("⚠️ 4plus fallback (BTTS mode): koristi SVE lige, samo BTTS kvote <1.45")
         all_fixtures = fetch_all_fixtures_no_filter(date_str)
         legs_all = assemble_legs_from_fixtures(all_fixtures, caps)
-
-        # Filtriraj samo BTTS tržišta i kvote <1.45
-        btts_legs = [
-            l for l in legs_all
-            if l["market"] == "BTTS" and l["odd"] < 1.45
-        ]
-
-        # Sortiraj po kvoti rastuće — sigurnije prvo
+        btts_legs = [l for l in legs_all if l["market"] == "BTTS" and l["odd"] < 1.45]
         btts_legs.sort(key=lambda L: L["odd"])
 
         fallback_ticket: List[Dict[str, Any]] = []
         odds_prod = 1.0
-
         for leg in btts_legs:
             if leg["fid"] in used:
                 continue
@@ -439,19 +420,44 @@ def _write_json(path: Path, obj: Any) -> None:
     with open(path, "w", encoding="utf-8") as f:
         json.dump(obj, f, ensure_ascii=False, indent=2)
 
+def _save_snapshot(date_str: str, tickets_payload: List[Dict[str, Any]]) -> None:
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    # json snapshot
+    with open(OUT_DIR / "feed_snapshot.json", "w", encoding="utf-8") as f:
+        json.dump({"date": date_str, "tickets": tickets_payload}, f, ensure_ascii=False, indent=2)
+    # txt snapshot samo za uvid
+    lines = [f"date={date_str}"]
+    for t in tickets_payload:
+        lines.append(f"[{t['name']}] target={t.get('target')} total={t.get('total_odds'):.2f}")
+        for lg in t["legs"]:
+            lines.append(
+                f"  - {lg['time']} | {lg['league']} | {lg['teams']} | {lg['market']} -> {lg['pick']} | odd={lg['odds']}"
+            )
+    with open(OUT_DIR / "feed_snapshot.txt", "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+
 def write_pages(date_str: str, tickets: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
     names = ["2plus","3plus","4plus"]
     out_meta = []
+    tickets_payload_for_snapshot: List[Dict[str, Any]] = []
+
     for i, legs in enumerate(tickets):
         name = names[i] if i < len(names) else f"t{i+1}"
+        ticket_json = _ticket_json(legs) if legs else {"total_odds": 0, "legs": []}
         payload = {
             "date": date_str,
             "name": name,
-            "ticket": _ticket_json(legs) if legs else {"total_odds": 0, "legs": []}
+            "ticket": ticket_json
         }
         _write_json(OUT_DIR / f"{name}.json", payload)
-        out_meta.append({"name": name, "total_odds": payload["ticket"]["total_odds"], "legs": len(payload["ticket"]["legs"])})
-    # ako i posle svega nema 3 fajla, napravi prazan 4plus da evaluate ima šta da čita
+        out_meta.append({"name": name, "total_odds": ticket_json["total_odds"], "legs": len(ticket_json["legs"])})
+        tickets_payload_for_snapshot.append({
+            "name": name,
+            "target": TARGETS[i] if i < len(TARGETS) else None,
+            "total_odds": ticket_json["total_odds"],
+            "legs": ticket_json["legs"],
+        })
+
     if len(tickets) < 3:
         empty_payload = {
             "date": date_str,
@@ -460,10 +466,21 @@ def write_pages(date_str: str, tickets: List[List[Dict[str, Any]]]) -> Dict[str,
         }
         _write_json(OUT_DIR / "4plus.json", empty_payload)
         out_meta.append({"name": "4plus", "total_odds": 0, "legs": 0})
+        tickets_payload_for_snapshot.append({
+            "name": "4plus",
+            "target": TARGETS[2] if len(TARGETS) >= 3 else 4.0,
+            "total_odds": 0,
+            "legs": [],
+        })
+
     _write_json(OUT_DIR / "daily_log.json", {
         "date": date_str,
         "tickets": out_meta
     })
+
+    # obavezno snimi snapshot
+    _save_snapshot(date_str, tickets_payload_for_snapshot)
+
     return {"count": len(out_meta), "files": [f"{m['name']}.json" for m in out_meta]}
 
 def run(date_str: Optional[str] = None) -> Dict[str, Any]:
@@ -475,4 +492,4 @@ def run(date_str: Optional[str] = None) -> Dict[str, Any]:
     return {"date": date_str, "tickets_count": meta["count"]}
 
 if __name__ == "__main__":
-    print(json.dumps(run(), ensure_ascii=False))
+    print(json.dumps(run(), ensure_ascii=False, indent=2))
