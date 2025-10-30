@@ -379,6 +379,7 @@ def build_three_tickets(date_str: str) -> List[List[Dict[str, Any]]]:
     used: set[int] = set()
     caps = dict(BASE_TH)
 
+    # === GLAVNI DEO: pravi 2+ i 3+ tikete normalno ===
     for step in range(RELAX_STEPS + 1):
         legs = assemble_legs(date_str, caps)
         for idx, target in enumerate(TARGETS, start=1):
@@ -394,38 +395,37 @@ def build_three_tickets(date_str: str) -> List[List[Dict[str, Any]]]:
         caps = {k: (v + RELAX_ADD) for k, v in caps.items()}
         _log(f"↘ relax step={step+1} caps+= {RELAX_ADD}")
 
-    # ===== FALBACK ZA 4+ =====
-# ===== FALBACK ZA 4+ (SIGURNIJA VARIJANTA) =====
-if len(tickets) < 3:
-    target_4 = TARGETS[2] if len(TARGETS) >= 3 else 4.0
-    _log("⚠️ 4plus fallback (safe mode): koristi NAJNIŽE kvote globalno, do ukupno 4.0+")
-    all_fixtures = fetch_all_fixtures_no_filter(date_str)
-    legs_all = assemble_legs_from_fixtures(all_fixtures, caps)
+    # === Fallback za 4+ tiket (sigurnija varijanta) ===
+    if len(tickets) < 3:
+        target_4 = TARGETS[2] if len(TARGETS) >= 3 else 4.0
+        _log("⚠️ 4plus fallback (safe mode): koristi NAJNIŽE kvote globalno, do ukupno 4.0+")
+        all_fixtures = fetch_all_fixtures_no_filter(date_str)
+        legs_all = assemble_legs_from_fixtures(all_fixtures, caps)
 
-    # Sortiraj po kvoti RASTUĆE — prvo male kvote (1.15–1.40)
-    legs_all.sort(key=lambda L: L["odd"])
+        # Sortiraj po kvoti RASTUĆE — prvo male kvote (1.15–1.75)
+        legs_all.sort(key=lambda L: L["odd"])
 
-    fallback_ticket: List[Dict[str, Any]] = []
-    odds_prod = 1.0
+        fallback_ticket: List[Dict[str, Any]] = []
+        odds_prod = 1.0
 
-    for leg in legs_all:
-        # Ignoriši ekstremno visoke kvote (npr. > 1.75) jer nisu “sigurne”
-        if leg["odd"] > 1.75:
-            continue
-        fallback_ticket.append(leg)
-        odds_prod *= leg["odd"]
+        for leg in legs_all:
+            # Ignoriši ekstremno visoke kvote (npr. > 1.75) jer nisu “sigurne”
+            if leg["odd"] > 1.75:
+                continue
+            fallback_ticket.append(leg)
+            odds_prod *= leg["odd"]
 
-        if len(fallback_ticket) >= LEGS_MIN and odds_prod >= target_4:
-            break
-        if len(fallback_ticket) >= LEGS_MAX:
-            break
+            if len(fallback_ticket) >= LEGS_MIN and odds_prod >= target_4:
+                break
+            if len(fallback_ticket) >= LEGS_MAX:
+                break
 
-    if len(fallback_ticket) >= LEGS_MIN:
-        tickets.append(fallback_ticket)
-        total = _product([x["odd"] for x in fallback_ticket])
-        _log(f"✅ 4plus fallback (safe) napravljen legs={len(fallback_ticket)} total={total:.2f}")
-    else:
-        _log("❌ 4plus fallback (safe) nije uspeo da sklopi tiket")
+        if len(fallback_ticket) >= LEGS_MIN:
+            tickets.append(fallback_ticket)
+            total = _product([x["odd"] for x in fallback_ticket])
+            _log(f"✅ 4plus fallback (safe) napravljen legs={len(fallback_ticket)} total={total:.2f}")
+        else:
+            _log("❌ 4plus fallback (safe) nije uspeo da sklopi tiket")
 
     return tickets[:3]
 
