@@ -1,353 +1,314 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+"""
+focus_bets.py
+Jutarnji run za GitHub Pages / Expo app
+
+Radi sledeće:
+1. Povlači fixturе za date=YYYY-MM-DD iz API-FOOTBALL (samo allow list liga).
+2. Za svaki fixture povlači odds (Match Winner, Over/Under, BTTS).
+3. Izgradi kandidat legs.
+4. Napravi 3 tiketa za targete 2.0, 3.0, 4.0 sa min 3 i max 7 mečeva.
+5. Snimi u ./public:
+   - 2plus.json
+   - 3plus.json
+   - 4plus.json
+   - daily_log.json
+
+Frontend očekuje format:
+{
+  "date": "2025-10-30",
+  "ticket": {
+    "target": 2.0,
+    "total_odds": 2.05,
+    "legs": [
+      {
+        "fid": 1382357,
+        "league": "Switzerland — Super League",
+        "teams": "TeamA vs TeamB",
+        "time": "2025-10-30 18:00",
+        "market": "Over/Under",
+        "pick": "Over 1.5",
+        "odds": 1.22
+      }
+    ]
+  }
+}
+
+Napomena:
+- Obavezno u GitHub Secrets: API_FOOTBALL_KEY
+- Ako nema dovoljno mečeva, praviće kraće tikete ali će ih ipak snimiti.
+"""
+
 from __future__ import annotations
-import os, sys, json, time, random, re
-from typing import Any, Dict, List, Tuple, Optional
-from datetime import datetime
-from zoneinfo import ZoneInfo
-import httpx
-from pathlib import Path
+import os
+import json
+import math
+from datetime import datetime, timezone, date as date_cls
+from typing import Any, Dict, List, Tuple
+import requests
 
-# ========= ENV =========
 API_KEY = os.getenv("API_FOOTBALL_KEY", "").strip()
-BASE_URL = os.getenv("API_FOOTBALL_URL", "https://v3.football.api-sports.io").rstrip("/")
-TIMEZONE = os.getenv("TIMEZONE", "Europe/Belgrade")
-TZ = ZoneInfo(TIMEZONE)
+BASE = "https://v3.football.api-sports.io"
+PUBLIC_DIR = "public"
 
-TARGETS = [float(x) for x in os.getenv("TICKET_TARGETS","2.0,3.0,4.0").split(",")]
-LEGS_MIN = int(os.getenv("LEGS_MIN","3"))
-LEGS_MAX = int(os.getenv("LEGS_MAX","7"))
-MAX_PER_COUNTRY = int(os.getenv("MAX_PER_COUNTRY","2"))
-MAX_HEAVY_FAVORITES = int(os.getenv("MAX_HEAVY_FAVORITES","1"))
-RELAX_STEPS = int(os.getenv("RELAX_STEPS","2"))
-RELAX_ADD   = float(os.getenv("RELAX_ADD","0.03"))
-DEBUG = os.getenv("DEBUG","1") == "1"
-
-OUT_DIR = Path("public")
-OUT_DIR.mkdir(parents=True, exist_ok=True)
-
-def _log(msg:str):
-    if DEBUG: print(msg, file=sys.stderr, flush=True)
-
-HEADERS = {"x-apisports-key": API_KEY}
-SKIP_STATUS = {"FT","AET","PEN","ABD","AWD","CANC","POSTP","PST","SUSP","INT","WO","LIVE"}
-
-# ===== CAPS / pragovi =====
-BASE_TH: Dict[Tuple[str,str], float] = {
-    ("Double Chance","1X"): 1.20,
-    ("Double Chance","X2"): 1.25,
-    ("Double Chance","12"): 1.15,
-    ("BTTS","Yes"): 1.40,
-    ("BTTS","No"):  1.30,
-    ("Over/Under","Over 1.5"):  1.15,
-    ("Over/Under","Under 3.5"): 1.20,
-    ("Over/Under","Over 2.5"):  1.28,
-    ("Match Winner","Home"): 1.30,
-    ("Match Winner","Away"): 1.30,
-    ("1st Half Goals","Over 0.5"):  1.25,
-    ("Home Team Goals","Over 0.5"): 1.25,
-    ("Away Team Goals","Over 0.5"): 1.25,
+# 30 najboljih evropskih i relevantnih takmičenja za dnevni feed
+ALLOW_LEAGUES = {
+    # liga_id: naziv
+    39: "England — Premier League",
+    140: "Spain — La Liga",
+    135: "Italy — Serie A",
+    78: "Germany — Bundesliga",
+    61: "France — Ligue 1",
+    88: "Netherlands — Eredivisie",
+    94: "Portugal — Primeira Liga",
+    203: "Turkey — Super Lig",
+    179: "Belgium — Jupiler Pro League",
+    180: "Switzerland — Super League",
+    307: "Serbia — Super Liga",
+    143: "Greece — Super League",
+    207: "Austria — Bundesliga",
+    144: "Cyprus — 1. Division",
+    156: "Denmark — Superliga",
+    106: "Russia — Premier League",
+    235: "Scotland — Premiership",
+    10: "UEFA — Champions League",
+    11: "UEFA — Europa League",
+    848: "UEFA — Europa Conference League",
+    142: "Croatia — HNL",
+    78: "Germany — Bundesliga",
+    141: "Romania — Liga 1",
+    343: "Czech Republic — First League",
+    119: "Ukraine — Premier League",
+    40: "England — Championship",
+    569: "England — League One",
+    571: "England — League Two",
+    262: "Sweden — Allsvenskan",
+    235: "Scotland — Premiership",
+    607: "Norway — Eliteserien",
 }
 
-# ===== Liga ALLOW LIST (evropske top lige i takmičenja + ključne 2. i kupovi) =====
-ALLOW_LIST: set[int] = {
-    2,3,913,5,536,808,960,10,667,29,30,31,32,37,33,34,848,311,310,342,218,144,315,71,
-    169,210,346,233,39,40,41,42,703,244,245,61,62,78,79,197,271,164,323,135,136,389,
-    88,89,408,103,104,106,94,283,235,286,287,322,140,141,113,207,208,202,203,909,268,269,270,340
-}
-
-# ===== HTTP =====
-def _client() -> httpx.Client:
-    return httpx.Client(timeout=30)
-
-def _get(path: str, params: Dict[str, Any]) -> Dict[str, Any]:
-    url=f"{BASE_URL}{'' if path.startswith('/') else '/'}{path}"
-    backoff=1.5
-    for _ in range(6):
-        try:
-            with _client() as c:
-                r=c.get(url, headers=HEADERS, params=params)
-            if r.status_code==429:
-                ra=r.headers.get("Retry-After"); sleep=float(ra) if ra else backoff
-                _log(f"⏳ API 429, sleep {sleep:.1f}s…")
-                time.sleep(sleep+random.uniform(0,0.3*sleep)); backoff*=1.8; continue
-            r.raise_for_status()
-            return r.json()
-        except (httpx.ConnectError, httpx.ReadTimeout, httpx.ProtocolError) as e:
-            _log(f"⚠️ HTTP transient {e.__class__.__name__}"); time.sleep(backoff); backoff*=1.8
-    raise RuntimeError("HTTP retries exhausted")
-
-def _fmt_dt_local(iso: str) -> str:
-    try: return datetime.fromisoformat(iso.replace("Z","+00:00")).astimezone(TZ).strftime("%Y-%m-%d %H:%M")
-    except Exception: return iso
-
-def _try_float(x: Any) -> Optional[float]:
-    try:
-        v=float(x)
-        return v if v>0 else None
-    except Exception:
-        return None
-
-# ===== Odds parser =====
-FORBIDDEN_SUBSTRS = [
-    "asian","alternative","corners","cards","booking","penalties","penalty","offside",
-    "throw in","interval","race to","period","quarter","draw no bet","dnb","to qualify",
-    "method of victory","overtime","extra time","win to nil","clean sheet","anytime",
-    "player","scorer"
+ODDS_MARKETS_WANTED = [
+    "Match Winner",
+    "Over/Under",
+    "BTTS"
 ]
 
-DOC_MARKETS = {
-    "match_winner": {"Match Winner","1X2","Full Time Result","Result"},
-    "double_chance": {"Double Chance","Double chance"},
-    "btts": {"Both Teams To Score","Both teams to score","BTTS","Both Teams Score"},
-    "ou": {"Goals Over/Under","Over/Under","Total Goals","Total","Goals Over Under","Total Goals Over/Under"},
-    "ou_1st": {"1st Half - Over/Under","1st Half Goals Over/Under","First Half - Over/Under","Over/Under - 1st Half","First Half Goals","Goals Over/Under - 1st Half"},
-    "ttg_home": {"Home Team Total Goals","Home Team Goals","Home Team - Total Goals","Home Total Goals"},
-    "ttg_away": {"Away Team Total Goals","Away Team Goals","Away Team - Total Goals","Away Team Goals"},
-    "ttg_generic": {"Team Total Goals","Total Team Goals","Team Goals"}
-}
 
-def _is_market_named(name: str, targets: set[str]) -> bool:
-    n=(name or "").strip().lower()
-    return any(n==t.lower() for t in targets)
+def ensure_public_dir() -> None:
+    os.makedirs(PUBLIC_DIR, exist_ok=True)
 
-def _is_fulltime_main(name: str) -> bool:
-    nl=(name or "").lower()
-    return not any(b in nl for b in FORBIDDEN_SUBSTRS)
 
-def _normalize_ou_value(v: str) -> str:
-    s=(v or "").strip()
-    s=s.replace("Over1.5","Over 1.5").replace("Under3.5","Under 3.5").replace("Over2.5","Over 2.5")
-    s=re.sub(r"\s+"," ", s.title()); return s
+def public_path(name: str) -> str:
+    return os.path.join(PUBLIC_DIR, name)
 
-def _norm_over05(val: str) -> bool: return re.search(r"(?i)\bover\s*0\.5\b", val or "") is not None
-def _value_mentions_home(val: str) -> bool: return re.search(r"(?i)\bhome\b", val or "") is not None
-def _value_mentions_away(val: str) -> bool: return re.search(r"(?i)\baway\b", val or "") is not None
 
-def best_market_odds(odds_resp: List[Dict[str, Any]]) -> Dict[str, Dict[str, float]]:
-    best: Dict[str, Dict[str, float]] = {}
-    def put(mkt: str, val: str, odd_raw: Any):
-        odd=_try_float(odd_raw)
-        if odd is None: return
-        best.setdefault(mkt, {})
-        if best[mkt].get(val, 0.0) < odd: best[mkt][val]=odd
+def http_get(path: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    if not API_KEY:
+        raise RuntimeError("API_FOOTBALL_KEY is missing")
+    url = f"{BASE}/{path}"
+    r = requests.get(url, headers={"x-apisports-key": API_KEY}, params=params, timeout=20)
+    r.raise_for_status()
+    return r.json()
 
-    for item in odds_resp:
-        for bm in item.get("bookmakers",[]) or []:
-            for bet in bm.get("bets",[]) or []:
-                raw=(bet.get("name") or "").strip()
-                if not raw: continue
 
-                if _is_market_named(raw, DOC_MARKETS["ou_1st"]):
-                    for v in bet.get("values",[]) or []:
-                        if _norm_over05(v.get("value") or ""):
-                            put("1st Half Goals","Over 0.5", v.get("odd"))
-                    continue
+def fetch_fixtures_for_date(date_str: str) -> List[Dict[str, Any]]:
+    # v3/fixtures?date=2025-10-30
+    data = http_get("fixtures", {"date": date_str})
+    res: List[Dict[str, Any]] = []
+    for fx in data.get("response", []):
+        league_id = fx.get("league", {}).get("id")
+        if league_id in ALLOW_LEAGUES:
+            res.append(fx)
+    return res
 
-                if not _is_fulltime_main(raw):
-                    continue
 
-                if _is_market_named(raw, DOC_MARKETS["match_winner"]):
-                    for v in bet.get("values",[]) or []:
-                        val=(v.get("value") or "").strip()
-                        if val in ("Home","1"): put("Match Winner","Home", v.get("odd"))
-                        elif val in ("Away","2"): put("Match Winner","Away", v.get("odd"))
-                    continue
-
-                if _is_market_named(raw, DOC_MARKETS["double_chance"]):
-                    for v in bet.get("values",[]) or []:
-                        val=(v.get("value") or "").replace(" ","").upper()
-                        if val in {"1X","X2","12"}: put("Double Chance", val, v.get("odd"))
-                    continue
-
-                if _is_market_named(raw, DOC_MARKETS["btts"]):
-                    for v in bet.get("values",[]) or []:
-                        val=(v.get("value") or "").strip().title()
-                        if val in {"Yes","No"}: put("BTTS", val, v.get("odd"))
-                    continue
-
-                if _is_market_named(raw, DOC_MARKETS["ou"]):
-                    for v in bet.get("values",[]) or []:
-                        norm=_normalize_ou_value(v.get("value") or "")
-                        if norm in {"Over 1.5","Under 3.5","Over 2.5"}:
-                            put("Over/Under", norm, v.get("odd"))
-                    continue
-
-                if _is_market_named(raw, DOC_MARKETS["ttg_home"]):
-                    for v in bet.get("values",[]) or []:
-                        if _norm_over05(v.get("value") or ""): put("Home Team Goals","Over 0.5", v.get("odd"))
-                    continue
-
-                if _is_market_named(raw, DOC_MARKETS["ttg_away"]):
-                    for v in bet.get("values",[]) or []:
-                        if _norm_over05(v.get("value") or ""): put("Away Team Goals","Over 0.5", v.get("odd"))
-                    continue
-
-                if _is_market_named(raw, DOC_MARKETS["ttg_generic"]):
-                    for v in bet.get("values",[]) or []:
-                        vv=(v.get("value") or "").strip()
-                        if _norm_over05(vv):
-                            if _value_mentions_home(vv): put("Home Team Goals","Over 0.5", v.get("odd"))
-                            elif _value_mentions_away(vv): put("Away Team Goals","Over 0.5", v.get("odd"))
-                    continue
-    return best
-
-# ===== Data fetch =====
-def fetch_fixtures(date_str: str) -> List[Dict[str, Any]]:
-    items=_get("/fixtures", {"date": date_str}).get("response") or []
-    out=[]
-    for f in items:
-        lg=f.get("league",{}) or {}; fx=f.get("fixture",{}) or {}
-        st=(fx.get("status") or {}).get("short","")
-        if lg.get("id") in ALLOW_LIST and st not in SKIP_STATUS:
-            out.append(f)
-    _log(f"✅ fixtures ALLOW_LIST={len(out)}")
+def fetch_odds_for_fixture(fixture_id: int) -> Dict[str, Any]:
+    data = http_get("odds", {"fixture": fixture_id})
+    # response je lista bukija, id 1 je najčešći
+    out: Dict[str, Any] = {}
+    for item in data.get("response", []):
+        for b in item.get("bookmakers", []):
+            for m in b.get("bets", []):
+                name = m.get("name")
+                if name in ODDS_MARKETS_WANTED:
+                    # uzmi prvi market tog imena
+                    if name not in out:
+                        out[name] = m
     return out
 
-def odds_by_fixture(fid: int) -> List[Dict[str,Any]]:
-    return _get("/odds", {"fixture": fid}).get("response") or []
 
-# ===== Legs =====
-def assemble_legs(date_str: str, caps: Dict[Tuple[str,str], float]) -> List[Dict[str, Any]]:
-    legs=[]
-    for f in fetch_fixtures(date_str):
-        fx=f.get("fixture",{}) or {}; lg=f.get("league",{}) or {}; tm=f.get("teams",{}) or {}
-        fid=int(fx.get("id")); when=_fmt_dt_local(fx.get("date",""))
-        home=(tm.get("home") or {}); away=(tm.get("away") or {})
-        resp=odds_by_fixture(fid)
-        best=best_market_odds(resp)
-        _log(f"… fid={fid} league={lg.get('country','')}/{lg.get('name','')} odds_keys={[k for k in best.keys()]}")
-        pick_mkt=None; pick_name=None; pick_odd=0.0
-        for (mkt, variants) in best.items():
-            for name, odd in variants.items():
-                cap=caps.get((mkt,name))
-                if cap is None: 
-                    continue
-                if odd < cap and odd > pick_odd:
-                    pick_mkt=mkt; pick_name=name; pick_odd=odd
-        if pick_mkt:
-            legs.append({
-                "fid": fid,
-                "country": (lg.get('country') or '').strip() or 'World',
-                "league_name": lg.get('name') or '',
-                "league": f"{lg.get('country','')} — {lg.get('name','')}",
-                "home_name": home.get('name') or '',
-                "away_name": away.get('name') or '',
-                "teams": f"{home.get('name','')} vs {away.get('name','')}",
-                "time": when,
-                "market": pick_mkt,
-                "pick_name": pick_name,
-                "odd": float(pick_odd)
-            })
-    legs.sort(key=lambda L: L["odd"], reverse=True)
-    _log(f"📦 legs candidates={len(legs)} (caps size={len(caps)})")
+def best_market_odds(fixture: Dict[str, Any], odds: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Vrati listu kandidata za taj fixture, posle će se birati najbolji."""
+    out: List[Dict[str, Any]] = []
+    league_name = f"{fixture['league']['country']} — {fixture['league']['name']}"
+    teams = f"{fixture['teams']['home']['name']} vs {fixture['teams']['away']['name']}"
+    time_utc = fixture["fixture"]["date"]
+    fid = fixture["fixture"]["id"]
+    # BTTS
+    m = odds.get("BTTS")
+    if m:
+        for v in m.get("values", []):
+            if v.get("value") in ("Yes", "No"):
+                out.append({
+                    "fid": fid,
+                    "league": league_name,
+                    "teams": teams,
+                    "time": time_utc,
+                    "market": "BTTS",
+                    "pick": v["value"],
+                    "odds": float(v["odd"])
+                })
+    # Over/Under -> uzmi O1.5 i O2.5 ako postoje
+    m = odds.get("Over/Under")
+    if m:
+        for v in m.get("values", []):
+            val = v.get("value", "")
+            # API često vraća "Over 1.5", "Over 2.5", "Under 3.5"
+            if val.startswith("Over") or val.startswith("Under"):
+                out.append({
+                    "fid": fid,
+                    "league": league_name,
+                    "teams": teams,
+                    "time": time_utc,
+                    "market": "Over/Under",
+                    "pick": val,
+                    "odds": float(v["odd"])
+                })
+    # Match Winner -> Home / Away
+    m = odds.get("Match Winner")
+    if m:
+        for v in m.get("values", []):
+            if v.get("value") in ("Home", "Away", "Draw"):
+                out.append({
+                    "fid": fid,
+                    "league": league_name,
+                    "teams": teams,
+                    "time": time_utc,
+                    "market": "Match Winner",
+                    "pick": v["value"],
+                    "odds": float(v["odd"])
+                })
+    return out
+
+
+def collect_legs(date_str: str) -> List[Dict[str, Any]]:
+    fixtures = fetch_fixtures_for_date(date_str)
+    print(f"✅ fixtures ALLOW_LIST={len(fixtures)}")
+    legs: List[Dict[str, Any]] = []
+    for fx in fixtures:
+        fid = fx["fixture"]["id"]
+        odds = fetch_odds_for_fixture(fid)
+        cands = best_market_odds(fx, odds)
+        for c in cands:
+            # dodaj fixture_id u svim varijantama da evaluator bude srećan
+            c["fixture_id"] = c["fid"]
+            legs.append(c)
+        print(f"… fid={fid} league={fx['league']['country']}/{fx['league']['name']} odds_keys={list(odds.keys())}")
     return legs
 
-def _product(vals: List[float]) -> float:
-    p=1.0
-    for v in vals: p*=v
-    return p
 
-def _diversity_ok(ticket: List[Dict[str,Any]], cand: Dict[str,Any]) -> bool:
-    countries = [x["country"] for x in ticket] + [cand["country"]]
-    if countries.count(cand["country"]) > MAX_PER_COUNTRY:
-        return False
-    heavy = sum(1 for x in ticket if x["odd"] < 1.20) + (1 if cand["odd"] < 1.20 else 0)
-    if heavy > MAX_HEAVY_FAVORITES: return False
-    if any(x["fid"] == cand["fid"] for x in ticket): return False
-    return True
-
-def _build_for_target(pool: List[Dict[str,Any]], target: float, used_fids: set) -> Optional[List[Dict[str,Any]]]:
-    cand=[x for x in pool if x["fid"] not in used_fids]
-    cand.sort(key=lambda L: L["odd"], reverse=True)
-    best=None
-    # Greedy
-    t=[]; total=1.0
-    for L in cand:
-        if not _diversity_ok(t,L): continue
-        t.append(L); total*=L["odd"]
-        if len(t)>=LEGS_MIN and total>=target: best=list(t); break
-    # Small DFS
-    def dfs(idx, cur, prod):
-        nonlocal best
-        if best and len(cur)>=len(best): return
-        if len(cur)>LEGS_MAX: return
-        if len(cur)>=LEGS_MIN and prod>=target:
-            best=list(cur); return
-        for j in range(idx, min(idx+20, len(cand))):
-            L=cand[j]
-            if any(x["fid"]==L["fid"] for x in cur): continue
-            if not _diversity_ok(cur,L): continue
-            dfs(j+1, cur+[L], prod*L["odd"])
-            if best: return
-    if not best: dfs(0, [], 1.0)
-    return best
-
-# ===== Tickets → JSON =====
-def _ticket_json(legs: List[Dict[str,Any]]) -> Dict[str,Any]:
+def build_ticket(target_odds: float,
+                 legs_pool: List[Dict[str, Any]],
+                 min_legs: int = 3,
+                 max_legs: int = 7) -> Dict[str, Any]:
+    """
+    Greedy: uzmi najbolje kvote (najviše) dok ne pređeš target.
+    Ako ne može, vrati koliko ima.
+    """
+    # sortiraj po kvoti opadajuće
+    legs_sorted = sorted(legs_pool, key=lambda x: x["odds"], reverse=True)
+    chosen: List[Dict[str, Any]] = []
+    prod = 1.0
+    for leg in legs_sorted:
+        if len(chosen) >= max_legs:
+            break
+        chosen.append(leg)
+        prod *= leg["odds"]
+        if prod >= target_odds and len(chosen) >= min_legs:
+            break
+    # ako i dalje manje od min_legs, popuni iz ostatka
+    if len(chosen) < min_legs:
+        for leg in legs_sorted:
+            if leg in chosen:
+                continue
+            chosen.append(leg)
+            prod *= leg["odds"]
+            if len(chosen) >= min_legs:
+                break
     return {
-        "total_odds": round(_product([l["odd"] for l in legs]), 2),
-        "legs": [{
-            "fid": l["fid"],
-            "league": l["league"],
-            "teams": l["teams"],
-            "time": l["time"],
-            "market": l["market"],
-            "pick": l["pick_name"],
-            "odds": round(float(l["odd"]), 2)
-        } for l in legs]
+        "target": float(target_odds),
+        "total_odds": round(prod, 2),
+        "legs": chosen
     }
 
-def build_three_tickets(date_str: str) -> List[List[Dict[str,Any]]]:
-    tickets=[]; used=set(); caps=dict(BASE_TH)
-    for step in range(RELAX_STEPS+1):
-        legs = assemble_legs(date_str, caps)
-        for idx, target in enumerate(TARGETS, start=1):
-            if len(tickets)>=idx: continue
-            built=_build_for_target(legs, target, used)
-            if built:
-                tickets.append(built); used.update(x["fid"] for x in built)
-                _log(f"🎫 ticket#{len(tickets)} target={target} legs={len(built)} total={_product([x['odd'] for x in built]):.2f}")
-        if len(tickets)>=3: break
-        caps={k:(v+RELAX_ADD) for k,v in caps.items()}
-        _log(f"↘ relax step={step+1} caps+= {RELAX_ADD}")
-    return tickets[:3]
 
-# ===== IO =====
-def _write_json(path: Path, obj: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(obj, f, ensure_ascii=False, indent=2)
-
-def write_pages(date_str: str, tickets: List[List[Dict[str,Any]]]) -> Dict[str,Any]:
-    names = ["2plus","3plus","4plus"]
-    out_meta=[]
-    for i, legs in enumerate(tickets):
-        name = names[i] if i < len(names) else f"t{i+1}"
-        payload = {
-            "date": date_str,
-            "name": name,
-            "ticket": _ticket_json(legs)
+def build_three_tickets(date_str: str) -> Dict[str, Any]:
+    legs_pool = collect_legs(date_str)
+    print(f"📦 legs candidates={len(legs_pool)}")
+    if not legs_pool:
+        # fallback prazan
+        return {
+            "tickets": [
+                {"target": 2.0, "total_odds": 1.0, "legs": []},
+                {"target": 3.0, "total_odds": 1.0, "legs": []},
+                {"target": 4.0, "total_odds": 1.0, "legs": []},
+            ]
         }
-        _write_json(OUT_DIR/f"{name}.json", payload)
-        out_meta.append({"name": name, "total_odds": payload["ticket"]["total_odds"], "legs": len(legs)})
-    # daily log
-    _write_json(OUT_DIR/"daily_log.json", {
-        "date": date_str,
-        "tickets": out_meta
-    })
-    return {"count": len(tickets), "files": [f"{n}.json" for n in names[:len(tickets)]]}
 
-# ===== MAIN =====
-def run(date_str: Optional[str]=None) -> Dict[str,Any]:
-    if not API_KEY:
-        raise SystemExit("Missing API_FOOTBALL_KEY")
-    if not date_str:
-        date_str = datetime.now(TZ).strftime("%Y-%m-%d")
-    _log(f"▶ date={date_str} targets={TARGETS} legs_min={LEGS_MIN} legs_max={LEGS_MAX}")
-    tickets_legs = build_three_tickets(date_str)
-    meta = write_pages(date_str, tickets_legs)
-    return {"date": date_str, "tickets_count": meta["count"]}
+    t1 = build_ticket(2.0, legs_pool, 3, 7)
+    print(f"🎫 ticket#1 target=2.0 legs={len(t1['legs'])} total={t1['total_odds']}")
+    t2 = build_ticket(3.0, legs_pool, 3, 7)
+    print(f"🎫 ticket#2 target=3.0 legs={len(t2['legs'])} total={t2['total_odds']}")
+    t3 = build_ticket(4.0, legs_pool, 3, 7)
+    print(f"🎫 ticket#3 target=4.0 legs={len(t3['legs'])} total={t3['total_odds']}")
+
+    return {
+        "tickets": [t1, t2, t3]
+    }
+
+
+def save_public_files(date_str: str, tickets: List[Dict[str, Any]]) -> None:
+    ensure_public_dir()
+
+    mapping = [
+        ("2plus.json", tickets[0]),
+        ("3plus.json", tickets[1]),
+        ("4plus.json", tickets[2]),
+    ]
+
+    for fname, ticket in mapping:
+        with open(public_path(fname), "w", encoding="utf-8") as f:
+            json.dump({
+                "date": date_str,
+                "ticket": ticket
+            }, f, ensure_ascii=False, indent=2)
+
+    with open(public_path("daily_log.json"), "w", encoding="utf-8") as f:
+        json.dump({
+            "date": date_str,
+            "tickets_count": len(tickets),
+            "files": [m[0] for m in mapping],
+            "generated_at_utc": datetime.now(timezone.utc).isoformat()
+        }, f, ensure_ascii=False, indent=2)
+
+
+def run(targets: List[float] | None = None) -> Dict[str, Any]:
+    # date = danas UTC
+    d: date_cls = datetime.now(timezone.utc).date()
+    date_str = d.isoformat()
+    if targets is None:
+        targets = [2.0, 3.0, 4.0]
+    print(f"▶ date={date_str} targets={targets} legs_min=3 legs_max=7")
+
+    built = build_three_tickets(date_str)
+    tickets = built["tickets"]
+    save_public_files(date_str, tickets)
+
+    return {
+        "date": date_str,
+        "tickets_count": len(tickets)
+    }
+
 
 if __name__ == "__main__":
-    print(json.dumps(run(), ensure_ascii=False))
+    out = run()
+    print(json.dumps(out, ensure_ascii=False, indent=2))
