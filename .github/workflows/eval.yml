@@ -3,49 +3,30 @@ name: evaluate
 on:
   workflow_dispatch:
   schedule:
-    - cron: "30 20 * * *"   # 20:30 UTC
+    # veče, po UTC
+    - cron: "45 20 * * *"
 
 jobs:
   eval:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pages: write
-      id-token: write
-      actions: read
+
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Download latest pages artifact via API
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
+      # 1) download jutarnji artifact
+      - name: Download morning pages artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: github-pages
+          path: tmp_art
+
+      # 2) prebaci u public/
+      - name: Restore public from artifact
         run: |
-          set -e
           mkdir -p public
-          mkdir -p tmp_art
-          ARTIFACT_ID=$(curl -s -H "Authorization: Bearer $GH_TOKEN" \
-            https://api.github.com/repos/$REPO/actions/artifacts?per_page=100 \
-            | jq -r '.artifacts[] | select(.name=="github-pages") | .id' | head -n 1)
-          if [ -z "$ARTIFACT_ID" ]; then
-            echo "no github-pages artifact found"
-            exit 1
-          fi
-          curl -L -H "Authorization: Bearer $GH_TOKEN" \
-            https://api.github.com/repos/$REPO/actions/artifacts/$ARTIFACT_ID/zip \
-            -o artifact.zip
-          unzip -o artifact.zip -d tmp_art
-
-          # sada imamo tmp_art/public/... pa to prebacujemo u ./public
-          if [ -d tmp_art/public ]; then
-            cp -r tmp_art/public/* public/
-          else
-            # ako je nekad zip bez public/ foldera, kopiraj sve
-            cp -r tmp_art/* public/
-          fi
-
-          ls -R public
+          cp -r tmp_art/* public/ || true
+          ls -R public || true
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -55,18 +36,23 @@ jobs:
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          pip install httpx
 
       - name: Run evaluation
+        env:
+          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
+          API_FOOTBALL_URL: ${{ secrets.API_FOOTBALL_URL }}
         run: |
-          python evaluate_results.py
-          ls -l public
+          python evaluate_ticket.py
+          cat public/evaluation.json
 
+      # 3) upload novi artifact za pages
       - name: Upload evaluated pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: ./public
+          path: public
 
+      # 4) deploy
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
