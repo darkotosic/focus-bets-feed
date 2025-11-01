@@ -174,3 +174,112 @@ def test_ticket_eval_loss_file(tmp_path, monkeypatch):
     assert ticket_eval["legs"][0]["result"] == "lose"
     assert ticket_eval["legs"][1]["result"] == "lose"
     assert ticket_eval["legs"][0]["score_ft"] == "0-1"
+
+
+def test_evening_evaluation_extended_markets(tmp_path, monkeypatch):
+    out_dir = tmp_path / "public"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    snapshot = {
+        "date": "2024-04-02",
+        "tickets": [
+            {
+                "name": "custom",
+                "target": 2.0,
+                "total_odds": 1.0,
+                "legs": [
+                    {
+                        "fid": 201,
+                        "league": "League X",
+                        "teams": "Team X vs Team Y",
+                        "time": "2024-04-02 18:00",
+                        "market": "1st Half Goals",
+                        "pick": "Over 0.5",
+                        "odds": 1.2,
+                    },
+                    {
+                        "fid": 202,
+                        "league": "League X",
+                        "teams": "Team X vs Team Y",
+                        "time": "2024-04-02 18:00",
+                        "market": "Home Team Goals",
+                        "pick": "Over 0.5",
+                        "odds": 1.2,
+                    },
+                    {
+                        "fid": 203,
+                        "league": "League X",
+                        "teams": "Team X vs Team Y",
+                        "time": "2024-04-02 18:00",
+                        "market": "Away Team Goals",
+                        "pick": "Over 0.5",
+                        "odds": 1.2,
+                    },
+                    {
+                        "fid": 204,
+                        "league": "League X",
+                        "teams": "Team X vs Team Y",
+                        "time": "2024-04-02 18:00",
+                        "market": "Over/Under",
+                        "pick": "Under 3.5",
+                        "odds": 1.4,
+                    },
+                ],
+            }
+        ],
+    }
+
+    with (out_dir / "feed_snapshot.json").open("w", encoding="utf-8") as fh:
+        json.dump(snapshot, fh)
+
+    evaluate_results = importlib.import_module("evaluate_results")
+    evaluate_results.PUBLIC = out_dir
+
+    def fake_fetch(fid):
+        data = {
+            201: {
+                "status": "FT",
+                "home_goals": 2,
+                "away_goals": 1,
+                "halftime_home": 1,
+                "halftime_away": 0,
+            },
+            202: {
+                "status": "FT",
+                "home_goals": 1,
+                "away_goals": 0,
+                "halftime_home": 0,
+                "halftime_away": 0,
+            },
+            203: {
+                "status": "FT",
+                "home_goals": 3,
+                "away_goals": 0,
+                "halftime_home": 2,
+                "halftime_away": 0,
+            },
+            204: {
+                "status": "FT",
+                "home_goals": 1,
+                "away_goals": 1,
+                "halftime_home": 1,
+                "halftime_away": 1,
+            },
+        }
+        return data[fid]
+
+    monkeypatch.setattr(evaluate_results, "fetch_fixture_result", fake_fetch)
+
+    evaluate_results.main()
+
+    evaluation_path = out_dir / "evaluation.json"
+    with evaluation_path.open("r", encoding="utf-8") as fh:
+        evaluation = json.load(fh)
+
+    ticket = evaluation["tickets"][0]
+    results = {leg["market"]: leg["result"]["hit"] for leg in ticket["legs"]}
+
+    assert results["1st Half Goals"] is True
+    assert results["Home Team Goals"] is True
+    assert results["Away Team Goals"] is False
+    assert results["Over/Under"] is True

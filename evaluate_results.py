@@ -41,21 +41,65 @@ def fetch_fixture_result(fid: int) -> dict:
         return {"status": "NA"}
     fx = data[0].get("fixture", {}) or {}
     goals = data[0].get("goals", {}) or {}
+    score = data[0].get("score", {}) or {}
+    halftime = score.get("halftime", {}) or {}
     return {
         "status": (fx.get("status") or {}).get("short") or "NA",
         "home_goals": goals.get("home"),
         "away_goals": goals.get("away"),
+        "halftime_home": halftime.get("home"),
+        "halftime_away": halftime.get("away"),
     }
 
 
 def leg_hit(leg: dict, res: dict) -> bool:
-    if res.get("status") not in {"FT", "AET", "PEN"}:
+    status = (res.get("status") or "").upper()
+    if status not in {"FT", "AET", "PEN", "WO", "AWD"}:
         # ako nije gotova, tretiramo kao promašaj da se vidi u appu
         return False
-    hg = res.get("home_goals", 0) or 0
-    ag = res.get("away_goals", 0) or 0
+    try:
+        hg = int(res.get("home_goals", 0) or 0)
+    except Exception:
+        hg = 0
+    try:
+        ag = int(res.get("away_goals", 0) or 0)
+    except Exception:
+        ag = 0
+    try:
+        ht_home = int(res.get("halftime_home", 0) or 0)
+    except Exception:
+        ht_home = 0
+    try:
+        ht_away = int(res.get("halftime_away", 0) or 0)
+    except Exception:
+        ht_away = 0
     market = leg.get("market")
     pick = leg.get("pick")
+
+    def parse_over_under(text: str):
+        if not text:
+            return None
+        parts = text.strip().split()
+        if len(parts) != 2:
+            return None
+        side, value = parts
+        side = side.lower()
+        if side not in {"over", "under"}:
+            return None
+        try:
+            line = float(value)
+        except ValueError:
+            return None
+        return side, line
+
+    def over_under_hit(total: float, text: str) -> bool:
+        parsed = parse_over_under(text)
+        if not parsed:
+            return False
+        side, line = parsed
+        if side == "over":
+            return (total - line) > 1e-9
+        return (line - total) > 1e-9
 
     # Match Winner
     if market == "Match Winner":
@@ -86,18 +130,18 @@ def leg_hit(leg: dict, res: dict) -> bool:
 
     # Over/Under
     if market == "Over/Under":
-        # očekujemo format "Over 1.5" ili "Under 3.5"
-        try:
-            parts = pick.split()
-            ou = parts[0].lower()
-            line = float(parts[1])
-            total = hg + ag
-            if ou == "over":
-                return total > line - 1e-9
-            else:
-                return total < line + 1e-9
-        except Exception:
-            return False
+        total = hg + ag
+        return over_under_hit(total, pick)
+
+    if market == "1st Half Goals":
+        total = ht_home + ht_away
+        return over_under_hit(total, pick)
+
+    if market == "Home Team Goals":
+        return over_under_hit(hg, pick)
+
+    if market == "Away Team Goals":
+        return over_under_hit(ag, pick)
 
     return False
 
@@ -162,6 +206,10 @@ def main() -> None:
             ag = res.get("away_goals")
             if is_final and hg is not None and ag is not None:
                 leg_summary["score_ft"] = f"{hg}-{ag}"
+            ht_home = res.get("halftime_home")
+            ht_away = res.get("halftime_away")
+            if is_final and ht_home is not None and ht_away is not None:
+                leg_summary["score_ht"] = f"{ht_home}-{ht_away}"
             simple_legs.append(leg_summary)
             out_legs.append(
                 {
@@ -170,6 +218,8 @@ def main() -> None:
                         "status": res.get("status"),
                         "home_goals": res.get("home_goals"),
                         "away_goals": res.get("away_goals"),
+                        "halftime_home": res.get("halftime_home"),
+                        "halftime_away": res.get("halftime_away"),
                         "hit": ok,
                         "emoji": "✅" if ok else "❌",
                     },
