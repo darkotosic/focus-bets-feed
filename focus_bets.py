@@ -23,7 +23,7 @@ LEGS_MIN = int(os.getenv("LEGS_MIN", "3"))
 LEGS_MAX = int(os.getenv("LEGS_MAX", "7"))
 MAX_PER_COUNTRY = int(os.getenv("MAX_PER_COUNTRY", "2"))
 MAX_HEAVY_FAVORITES = int(os.getenv("MAX_HEAVY_FAVORITES", "1"))
-RELAX_STEPS = int(os.getenv("RELAX_STEPS", "2"))
+RELAX_STEPS = int(os.getenv("RELAX_STEPS", "5"))
 RELAX_ADD = float(os.getenv("RELAX_ADD", "0.03"))
 DEBUG = os.getenv("DEBUG", "1") == "1"
 
