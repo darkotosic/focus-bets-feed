@@ -17,7 +17,8 @@ BASE_URL = os.getenv("API_FOOTBALL_URL", "https://v3.football.api-sports.io").rs
 TIMEZONE = os.getenv("TIMEZONE", "Europe/Belgrade")
 TZ = ZoneInfo(TIMEZONE)
 
-TARGETS = [float(x) for x in os.getenv("TICKET_TARGETS", "2.0,3.0,4.0").split(",")]
+# All tickets target 2.0 as requested
+TARGETS = [2.0, 2.0, 2.0]
 LEGS_MIN = int(os.getenv("LEGS_MIN", "3"))
 LEGS_MAX = int(os.getenv("LEGS_MAX", "7"))
 MAX_PER_COUNTRY = int(os.getenv("MAX_PER_COUNTRY", "2"))
@@ -36,7 +37,7 @@ def _log(msg: str):
 HEADERS = {"x-apisports-key": API_KEY}
 SKIP_STATUS = {"FT","AET","PEN","ABD","AWD","CANC","POSTP","PST","SUSP","INT","WO","LIVE"}
 
-# ===== bazni pragovi =====
+# ===== baseline odds caps (kept conservative; RELAX_ADD will loosen) =====
 BASE_TH: Dict[Tuple[str,str], float] = {
     ("Double Chance","1X"): 1.20,
     ("Double Chance","X2"): 1.25,
@@ -53,12 +54,24 @@ BASE_TH: Dict[Tuple[str,str], float] = {
     ("Away Team Goals","Over 0.5"): 1.25,
 }
 
-# ===== allow list =====
+# ===== allow list (unchanged) =====
 ALLOW_LIST: set[int] = {
     2,3,913,5,536,808,960,10,667,29,30,31,32,37,33,34,848,311,310,342,218,144,315,71,
     169,210,346,233,39,40,41,42,703,244,245,61,62,78,79,197,271,164,323,135,136,389,
     88,89,408,103,104,106,94,283,235,286,287,322,140,141,113,207,208,202,203,909,268,269,270,340
 }
+
+# ===== priority leagues: countries + UEFA comps =====
+PRIORITY_COUNTRIES = {
+    "England","France","Spain","Germany","Italy","Netherlands","Serbia","Turkey"
+}
+PRIORITY_COMP_PATTERNS = [
+    r"UEFA\s+Champions\s+League",
+    r"UEFA\s+Europa\s+League",
+    r"UEFA\s+Europa\s+Conference",
+    r"UEFA\s+Nations\s+League"
+]
+PRIORITY_COMP_RE = re.compile("|".join(PRIORITY_COMP_PATTERNS), re.I)
 
 # ===== HTTP =====
 def _client() -> httpx.Client:
@@ -244,7 +257,20 @@ def fetch_all_fixtures_no_filter(date_str: str) -> List[Dict[str, Any]]:
 def odds_by_fixture(fid: int) -> List[Dict[str, Any]]:
     return _get("/odds", {"fixture": fid}).get("response") or []
 
-def assemble_legs_from_fixtures(fixtures: List[Dict[str, Any]], caps: Dict[Tuple[str,str], float]) -> List[Dict[str, Any]]:
+# ===== priority scoring =====
+def _priority_score(league_country: str, league_name: str) -> int:
+    if league_country in PRIORITY_COUNTRIES:
+        return 2
+    if PRIORITY_COMP_RE.search(league_name or ""):
+        return 2
+    return 1
+
+# ===== leg assembly =====
+def assemble_legs_from_fixtures(
+    fixtures: List[Dict[str, Any]],
+    caps: Dict[Tuple[str,str], float],
+    allowed_pairs: Optional[set[Tuple[str,str]]] = None
+) -> List[Dict[str, Any]]:
     legs = []
     for f in fixtures:
         fx = f.get("fixture", {}) or {}
@@ -254,14 +280,19 @@ def assemble_legs_from_fixtures(fixtures: List[Dict[str, Any]], caps: Dict[Tuple
         when_local = _fmt_dt_local(fx.get("date", ""))
         home = (tm.get("home") or {})
         away = (tm.get("away") or {})
+
         resp = odds_by_fixture(fid)
         best = best_market_odds(resp)
         _log(f"… fid={fid} league={lg.get('country','')}/{lg.get('name','')} odds_keys={[k for k in best.keys()]}")
+
         pick_mkt = None
         pick_name = None
         pick_odd = 0.0
+
         for (mkt, variants) in best.items():
             for name, odd in variants.items():
+                if allowed_pairs is not None and (mkt, name) not in allowed_pairs:
+                    continue
                 cap = caps.get((mkt, name))
                 if cap is None:
                     continue
@@ -269,8 +300,8 @@ def assemble_legs_from_fixtures(fixtures: List[Dict[str, Any]], caps: Dict[Tuple
                     pick_mkt = mkt
                     pick_name = name
                     pick_odd = odd
+
         if pick_mkt:
-            # OVDE SPAJAMO DATUM + FID
             display_time = f"{when_local} • {fid}"
             legs.append({
                 "fid": fid,
@@ -280,17 +311,20 @@ def assemble_legs_from_fixtures(fixtures: List[Dict[str, Any]], caps: Dict[Tuple
                 "home_name": home.get("name") or "",
                 "away_name": away.get("name") or "",
                 "teams": f"{home.get('name','')} vs {away.get('name','')}",
-                "time": display_time,  # app prikazuje ovo
+                "time": display_time,
                 "market": pick_mkt,
                 "pick_name": pick_name,
-                "odd": float(pick_odd)
+                "odd": float(pick_odd),
+                "prio": _priority_score(lg.get("country") or "", lg.get("name") or "")
             })
-    legs.sort(key=lambda L: L["odd"], reverse=True)
+
+    # priority first, then by descending odd
+    legs.sort(key=lambda L: (L["prio"], L["odd"]), reverse=True)
     _log(f"📦 legs candidates={len(legs)} (caps size={len(caps)})")
     return legs
 
-def assemble_legs(date_str: str, caps: Dict[Tuple[str,str], float]) -> List[Dict[str, Any]]:
-    return assemble_legs_from_fixtures(fetch_fixtures(date_str), caps)
+def assemble_legs(date_str: str, caps: Dict[Tuple[str,str], float], allowed_pairs: Optional[set[Tuple[str,str]]] = None) -> List[Dict[str, Any]]:
+    return assemble_legs_from_fixtures(fetch_fixtures(date_str), caps, allowed_pairs)
 
 def _product(vals: List[float]) -> float:
     p = 1.0
@@ -311,7 +345,7 @@ def _diversity_ok(ticket: List[Dict[str, Any]], cand: Dict[str, Any]) -> bool:
 
 def _build_for_target(pool: List[Dict[str, Any]], target: float, used_fids: set) -> Optional[List[Dict[str, Any]]]:
     cand = [x for x in pool if x["fid"] not in used_fids]
-    cand.sort(key=lambda L: L["odd"], reverse=True)
+    cand.sort(key=lambda L: (L["prio"], L["odd"]), reverse=True)
     best = None
 
     # greedy
@@ -336,7 +370,7 @@ def _build_for_target(pool: List[Dict[str, Any]], target: float, used_fids: set)
         if len(cur) >= LEGS_MIN and prod >= target:
             best = list(cur)
             return
-        for j in range(idx, min(idx + 20, len(cand))):
+        for j in range(idx, min(idx + 24, len(cand))):
             L = cand[j]
             if any(x["fid"] == L["fid"] for x in cur):
                 continue
@@ -357,64 +391,73 @@ def _ticket_json(legs: List[Dict[str, Any]]) -> Dict[str, Any]:
             "fid": l["fid"],
             "league": l["league"],
             "teams": l["teams"],
-            "time": l["time"],  # vec sadrzi • fid
+            "time": l["time"],               # TicketScreen reads "time" or "kickoff_local"
             "market": l["market"],
-            "pick": l["pick_name"],
+            "pick": l["pick_name"],          # TicketScreen maps pick/pick_name
             "odds": round(float(l["odd"]), 2)
         } for l in legs]
     }
 
+# ===== requested build rules =====
+ALLOWED_T2: set[Tuple[str,str]] = {
+    ("Double Chance","1X"),
+    ("Double Chance","X2"),
+    ("Over/Under","Over 1.5"),
+    ("Over/Under","Over 2.5"),
+    ("Over/Under","Under 3.5"),
+}
+ALLOWED_T3: set[Tuple[str,str]] = {
+    ("BTTS","Yes"),
+    ("BTTS","No"),
+    ("Match Winner","Home"),
+    ("Match Winner","Away"),
+}
+
+def _pool_for_ticket(date_str: str, caps: Dict[Tuple[str,str], float], allowed_pairs: Optional[set[Tuple[str,str]]]) -> List[Dict[str, Any]]:
+    legs = assemble_legs(date_str, caps, allowed_pairs)
+    # if pool too small, widen to ALL fixtures while keeping the same allowed pairs rule
+    if len(legs) < 25:
+        all_fixtures = fetch_all_fixtures_no_filter(date_str)
+        legs = assemble_legs_from_fixtures(all_fixtures, caps, allowed_pairs)
+    return legs
+
 def build_three_tickets(date_str: str) -> List[List[Dict[str, Any]]]:
     tickets: List[List[Dict[str, Any]]] = []
     used: set[int] = set()
-    caps = dict(BASE_TH)
 
-    for step in range(RELAX_STEPS + 1):
-        legs = assemble_legs(date_str, caps)
-        for idx, target in enumerate(TARGETS, start=1):
-            if len(tickets) >= idx:
-                continue
-            built = _build_for_target(legs, target, used)
+    # ticket configs: [(allowed_pairs or None), target]
+    configs = [
+        (None, TARGETS[0]),        # Ticket #1: mixed like before
+        (ALLOWED_T2, TARGETS[1]),  # Ticket #2: 1X/X2/O1.5/O2.5/U3.5
+        (ALLOWED_T3, TARGETS[2])   # Ticket #3: BTTS Yes/No + Home/Away
+    ]
+
+    # progressive relaxation for each ticket independently
+    for idx, (allowed_pairs, target) in enumerate(configs, start=1):
+        caps = dict(BASE_TH)
+        built = None
+        for step in range(RELAX_STEPS + 1):
+            pool = _pool_for_ticket(date_str, caps, allowed_pairs)
+            built = _build_for_target(pool, target, used)
             if built:
-                tickets.append(built)
-                used.update(x["fid"] for x in built)
-                total = _product([x["odd"] for x in built])
-                _log(f"🎫 ticket#{len(tickets)} target={target} legs={len(built)} total={total:.2f}")
-        if len(tickets) >= 3:
-            break
-        caps = {k: (v + RELAX_ADD) for k, v in caps.items()}
-        _log(f"↘ relax step={step+1} caps+= {RELAX_ADD}")
-
-    # FALLBACK za 4+
-    if len(tickets) < 3:
-        target_4 = TARGETS[2] if len(TARGETS) >= 3 else 4.0
-        _log("⚠️ 4plus fallback (BTTS mode): koristi SVE lige, samo BTTS kvote <1.45")
-        all_fixtures = fetch_all_fixtures_no_filter(date_str)
-        legs_all = assemble_legs_from_fixtures(all_fixtures, caps)
-        btts_legs = [l for l in legs_all if l["market"] == "BTTS" and l["odd"] < 1.45]
-        btts_legs.sort(key=lambda L: L["odd"])
-
-        fallback_ticket: List[Dict[str, Any]] = []
-        odds_prod = 1.0
-        for leg in btts_legs:
-            if leg["fid"] in used:
-                continue
-            fallback_ticket.append(leg)
-            odds_prod *= leg["odd"]
-            if len(fallback_ticket) >= LEGS_MIN and odds_prod >= target_4:
                 break
-            if len(fallback_ticket) >= LEGS_MAX:
-                break
-
-        if len(fallback_ticket) >= LEGS_MIN:
-            tickets.append(fallback_ticket)
-            total = _product([x["odd"] for x in fallback_ticket])
-            _log(f"✅ 4plus fallback (BTTS safe) legs={len(fallback_ticket)} total={total:.2f}")
+            caps = {k: (v + RELAX_ADD) for k, v in caps.items()}
+            _log(f"↘ relax T{idx} step={step+1} caps+= {RELAX_ADD}")
+        if not built:
+            # last-ditch: drop country diversity but keep used_fids and caps
+            pool = _pool_for_ticket(date_str, caps, allowed_pairs)
+            built = _build_for_target(pool, target, used=set())  # allow reuse if absolutely needed
+        if built:
+            tickets.append(built)
+            used.update(x["fid"] for x in built)
+            total = _product([x["odd"] for x in built])
+            _log(f"🎫 ticket#{idx} legs={len(built)} total={total:.2f}")
         else:
-            _log("❌ 4plus fallback (BTTS) nije uspeo da sklopi tiket")
+            tickets.append([])  # keep file shape consistent
 
     return tickets[:3]
 
+# ===== I/O =====
 def _write_json(path: Path, obj: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
@@ -422,10 +465,8 @@ def _write_json(path: Path, obj: Any) -> None:
 
 def _save_snapshot(date_str: str, tickets_payload: List[Dict[str, Any]]) -> None:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    # json snapshot
     with open(OUT_DIR / "feed_snapshot.json", "w", encoding="utf-8") as f:
         json.dump({"date": date_str, "tickets": tickets_payload}, f, ensure_ascii=False, indent=2)
-    # txt snapshot samo za uvid
     lines = [f"date={date_str}"]
     for t in tickets_payload:
         lines.append(f"[{t['name']}] target={t.get('target')} total={t.get('total_odds'):.2f}")
@@ -437,7 +478,7 @@ def _save_snapshot(date_str: str, tickets_payload: List[Dict[str, Any]]) -> None
         f.write("\n".join(lines))
 
 def write_pages(date_str: str, tickets: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
-    names = ["2plus","3plus","4plus"]
+    names = ["2plus","3plus","4plus"]  # file names remain the same for app/pages.yml compatibility
     out_meta = []
     tickets_payload_for_snapshot: List[Dict[str, Any]] = []
 
@@ -458,29 +499,12 @@ def write_pages(date_str: str, tickets: List[List[Dict[str, Any]]]) -> Dict[str,
             "legs": ticket_json["legs"],
         })
 
-    if len(tickets) < 3:
-        empty_payload = {
-            "date": date_str,
-            "name": "4plus",
-            "ticket": {"total_odds": 0, "legs": []}
-        }
-        _write_json(OUT_DIR / "4plus.json", empty_payload)
-        out_meta.append({"name": "4plus", "total_odds": 0, "legs": 0})
-        tickets_payload_for_snapshot.append({
-            "name": "4plus",
-            "target": TARGETS[2] if len(TARGETS) >= 3 else 4.0,
-            "total_odds": 0,
-            "legs": [],
-        })
-
     _write_json(OUT_DIR / "daily_log.json", {
         "date": date_str,
         "tickets": out_meta
     })
 
-    # obavezno snimi snapshot
     _save_snapshot(date_str, tickets_payload_for_snapshot)
-
     return {"count": len(out_meta), "files": [f"{m['name']}.json" for m in out_meta]}
 
 def run(date_str: Optional[str] = None) -> Dict[str, Any]:
