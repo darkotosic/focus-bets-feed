@@ -438,7 +438,8 @@ def build_three_tickets(date_str: str) -> List[List[Dict[str, Any]]]:
         built = None
         for step in range(RELAX_STEPS + 1):
             pool = _pool_for_ticket(date_str, caps, allowed_pairs)
-            built = _build_for_target(pool, target, used)
+            built = built = _build_for_target(pool, target, set())  # allow reuse if absolutely needed
+
             if built:
                 break
             caps = {k: (v + RELAX_ADD) for k, v in caps.items()}
