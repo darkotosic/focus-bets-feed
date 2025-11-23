@@ -438,7 +438,7 @@ def build_three_tickets(date_str: str) -> List[List[Dict[str, Any]]]:
         built = None
         for step in range(RELAX_STEPS + 1):
             pool = _pool_for_ticket(date_str, caps, allowed_pairs)
-            built = built = _build_for_target(pool, target, set())  # allow reuse if absolutely needed
+            built = _build_for_target(pool, target, used)
 
             if built:
                 break
@@ -447,7 +447,7 @@ def build_three_tickets(date_str: str) -> List[List[Dict[str, Any]]]:
         if not built:
             # last-ditch: drop country diversity but keep used_fids and caps
             pool = _pool_for_ticket(date_str, caps, allowed_pairs)
-            built = _build_for_target(pool, target, used=set())  # allow reuse if absolutely needed
+            built = _build_for_target(pool, target, used)
         if built:
             tickets.append(built)
             used.update(x["fid"] for x in built)
