@@ -1,9 +1,8 @@
-
 name: feed
 
 on:
   schedule:
-    - cron: "15 5 * * *"   # 06:15 Europe/Belgrade
+    - cron: "15 4 * * *"   # 06:15 Europe/Belgrade
   workflow_dispatch:
 
 permissions:
@@ -19,18 +18,20 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - uses: actions/configure-pages@v5
-        with:
-          token: ${{ secrets.PAGES_DEPLOY_TOKEN }}
-          enablement: true
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+        # NEMA token: ... -> koristi automatski GITHUB_TOKEN
 
-      - run: pip install -r requirements.txt
+      - name: Install requirements
+        run: pip install -r requirements.txt
 
       - name: Generate daily JSON feed
         env:
@@ -56,8 +57,10 @@ jobs:
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
+    # permissions se već nasleđuju od globalnog bloka iznad
+
     steps:
-      - id: deployment
+      - name: Deploy to GitHub Pages
+        id: deployment
         uses: actions/deploy-pages@v4
-        with:
-          token: ${{ secrets.PAGES_DEPLOY_TOKEN }}
+        # opet: BEZ token: ...
